@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.iptvapp.data.model.IptvHomeState
 import com.example.iptvapp.data.repository.IptvRepository
 import com.example.iptvapp.data.repository.LocalIptvRepository
+import com.example.iptvapp.sync.PlaylistSyncScheduler
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -32,6 +33,10 @@ class MainViewModel(
     application: Application,
     private val repository: IptvRepository = LocalIptvRepository(application)
 ) : AndroidViewModel(application) {
+    init {
+        PlaylistSyncScheduler.schedule(application)
+    }
+
     val homeState: StateFlow<IptvHomeState> = repository.homeState.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),

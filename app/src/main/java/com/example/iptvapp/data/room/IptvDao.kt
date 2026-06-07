@@ -11,6 +11,9 @@ interface IptvDao {
     @Query("SELECT * FROM playlists ORDER BY lastUpdatedEpochMillis DESC")
     fun observePlaylists(): Flow<List<PlaylistEntity>>
 
+    @Query("SELECT * FROM playlists ORDER BY lastUpdatedEpochMillis DESC")
+    suspend fun getPlaylists(): List<PlaylistEntity>
+
     @Query("SELECT * FROM channels ORDER BY number ASC")
     fun observeChannels(): Flow<List<ChannelEntity>>
 

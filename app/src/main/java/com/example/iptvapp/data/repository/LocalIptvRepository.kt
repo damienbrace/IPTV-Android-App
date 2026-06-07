@@ -120,6 +120,47 @@ class LocalIptvRepository(
         return channel.toChannel(dao.getPlaylist(channel.playlistId))
     }
 
+    suspend fun refreshSavedPlaylists(): Result<Unit> {
+        return runCatching {
+            val playlists = dao.getPlaylists()
+            playlists.forEach { playlist ->
+                val password = credentialVault.decrypt(playlist.encryptedPassword)
+                refreshPlaylist(playlist, password)
+            }
+        }
+    }
+
+    private suspend fun refreshPlaylist(playlist: PlaylistEntity, password: String) {
+        xcodesApiClient.testConnection(playlist.serverUrl, playlist.username, password).getOrThrow()
+        val categories = xcodesApiClient.fetchLiveCategories(playlist.serverUrl, playlist.username, password).getOrElse { emptyList() }
+        val categoryNamesById = categories.associate { it.id to it.name }
+        val liveStreams = xcodesApiClient.fetchLiveStreams(playlist.serverUrl, playlist.username, password).getOrThrow()
+        val channelEntities = liveStreams.mapIndexed { index, stream ->
+            stream.toChannelEntity(
+                playlistId = playlist.id,
+                number = index + 1,
+                category = categoryNamesById[stream.categoryId] ?: "Live TV",
+                serverUrl = playlist.serverUrl,
+                username = playlist.username,
+                password = password
+            )
+        }
+
+        dao.upsertPlaylist(
+            playlist.copy(
+                lastUpdatedEpochMillis = System.currentTimeMillis(),
+                connected = true
+            )
+        )
+        dao.replaceChannelsForPlaylist(playlist.id, channelEntities)
+        syncShortEpg(
+            channelEntities = channelEntities,
+            serverUrl = playlist.serverUrl,
+            username = playlist.username,
+            password = password
+        )
+    }
+
     private fun XcodesLiveStream.toChannelEntity(
         playlistId: String,
         number: Int,
