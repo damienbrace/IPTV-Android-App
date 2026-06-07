@@ -75,6 +75,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -111,6 +112,14 @@ private val TextPrimary = Color(0xFFF8FAFF)
 private val TextSecondary = Color(0xFFB8C1D4)
 private val TextMuted = Color(0xFF7D879A)
 private val Success = Color(0xFF36D37E)
+
+object TestTags {
+    const val LiveNav = "nav_live"
+    const val GuideNav = "nav_guide"
+    const val SearchNav = "nav_search"
+    const val PlaylistsNav = "nav_playlists"
+    const val SettingsNav = "nav_settings"
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -1609,6 +1618,7 @@ private fun BottomNavItem(screen: AppScreen, selected: Boolean, onClick: () -> U
     Column(
         modifier = Modifier
             .width(64.dp)
+            .testTag(screen.testTag)
             .clip(RoundedCornerShape(8.dp))
             .clickable(onClick = onClick)
             .padding(vertical = 4.dp),
@@ -1624,6 +1634,15 @@ private fun BottomNavItem(screen: AppScreen, selected: Boolean, onClick: () -> U
         )
     }
 }
+
+private val AppScreen.testTag: String
+    get() = when (this) {
+        AppScreen.Live -> TestTags.LiveNav
+        AppScreen.Guide -> TestTags.GuideNav
+        AppScreen.Search -> TestTags.SearchNav
+        AppScreen.Playlists -> TestTags.PlaylistsNav
+        AppScreen.Settings -> TestTags.SettingsNav
+    }
 
 private fun AppScreen.toGlyphKind(): GlyphKind = when (this) {
     AppScreen.Live -> GlyphKind.Screen
