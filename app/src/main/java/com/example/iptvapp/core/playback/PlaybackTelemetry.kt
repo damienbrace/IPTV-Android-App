@@ -2,15 +2,31 @@ package com.example.iptvapp.core.playback
 
 import android.os.SystemClock
 import androidx.media3.common.Player
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 data class PlaybackTelemetrySnapshot(
     val channelId: String? = null,
+    val channelName: String? = null,
     val startupMs: Long? = null,
     val rebufferCount: Int = 0,
     val channelSwitchCount: Int = 0,
     val errorCount: Int = 0,
     val lastError: String? = null
 )
+
+object PlaybackDiagnosticsStore {
+    private val _recentSnapshots = MutableStateFlow<List<PlaybackTelemetrySnapshot>>(emptyList())
+    val recentSnapshots: StateFlow<List<PlaybackTelemetrySnapshot>> = _recentSnapshots.asStateFlow()
+
+    fun record(snapshot: PlaybackTelemetrySnapshot) {
+        _recentSnapshots.value = listOf(snapshot) + _recentSnapshots.value.filterNot {
+            it.channelId == snapshot.channelId && it.channelName == snapshot.channelName
+        }
+            .take(19)
+    }
+}
 
 class PlaybackTelemetryRecorder {
     private var currentChannelId: String? = null
@@ -19,7 +35,7 @@ class PlaybackTelemetryRecorder {
     private var lastState: Int = Player.STATE_IDLE
     private var snapshot = PlaybackTelemetrySnapshot()
 
-    fun onChannelLoad(channelId: String): PlaybackTelemetrySnapshot {
+    fun onChannelLoad(channelId: String, channelName: String): PlaybackTelemetrySnapshot {
         val previousChannelId = currentChannelId
         currentChannelId = channelId
         loadStartedAtMs = SystemClock.elapsedRealtime()
@@ -27,10 +43,12 @@ class PlaybackTelemetryRecorder {
         lastState = Player.STATE_BUFFERING
         snapshot = snapshot.copy(
             channelId = channelId,
+            channelName = channelName,
             startupMs = null,
             channelSwitchCount = snapshot.channelSwitchCount + if (previousChannelId == null || previousChannelId == channelId) 0 else 1,
             lastError = null
         )
+        PlaybackDiagnosticsStore.record(snapshot)
         return snapshot
     }
 
@@ -45,6 +63,7 @@ class PlaybackTelemetryRecorder {
         }
 
         lastState = state
+        PlaybackDiagnosticsStore.record(snapshot)
         return snapshot
     }
 
@@ -53,6 +72,7 @@ class PlaybackTelemetryRecorder {
             errorCount = snapshot.errorCount + 1,
             lastError = message
         )
+        PlaybackDiagnosticsStore.record(snapshot)
         return snapshot
     }
 

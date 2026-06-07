@@ -80,6 +80,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.PlayerView
+import com.example.iptvapp.core.playback.PlaybackDiagnosticsStore
 import com.example.iptvapp.core.playback.IptvPlayerFactory
 import com.example.iptvapp.core.playback.PlaybackTelemetryRecorder
 import com.example.iptvapp.core.playback.PlaybackTelemetrySnapshot
@@ -128,6 +129,7 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel()) {
     val homeState by viewModel.homeState.collectAsState()
     val connectionTestState by viewModel.connectionTestState.collectAsState()
     val playlistSaveState by viewModel.playlistSaveState.collectAsState()
+    val diagnostics by PlaybackDiagnosticsStore.recentSnapshots.collectAsState()
     var currentScreen by remember { mutableStateOf(AppScreen.Live) }
     var showAddPlaylist by remember { mutableStateOf(false) }
     var selectedChannel by remember { mutableStateOf<Channel?>(null) }
@@ -206,7 +208,7 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel()) {
                                 playlists = homeState.playlists,
                                 onAddPlaylist = { showAddPlaylist = true }
                             )
-                            AppScreen.Settings -> SettingsScreen()
+                            AppScreen.Settings -> SettingsScreen(diagnostics = diagnostics)
                         }
                     }
                 }
@@ -677,7 +679,7 @@ private fun PlayerScreen(
     LaunchedEffect(channel.id) {
         errorMessage = null
         playbackState = Player.STATE_BUFFERING
-        telemetry = telemetryRecorder.onChannelLoad(channel.id)
+        telemetry = telemetryRecorder.onChannelLoad(channel.id, channel.name)
         val mediaItem = IptvPlayerFactory(context).buildLiveMediaItem(
             streamUrl = channel.streamUrl,
             channelId = channel.id,
@@ -876,7 +878,7 @@ private fun TelemetryValue(label: String, value: String) {
 }
 
 @Composable
-private fun SettingsScreen() {
+private fun SettingsScreen(diagnostics: List<PlaybackTelemetrySnapshot>) {
     Column(modifier = Modifier.fillMaxSize()) {
         AppHeader(
             title = {
@@ -903,6 +905,71 @@ private fun SettingsScreen() {
                 Text(label, color = TextPrimary, fontSize = 15.sp, letterSpacing = 0.sp, modifier = Modifier.weight(1f))
                 SmallGlyph(kind = GlyphKind.Chevron, tint = TextMuted)
             }
+        }
+
+        Text(
+            "Diagnostics",
+            color = TextPrimary,
+            fontWeight = FontWeight.Bold,
+            fontSize = 16.sp,
+            letterSpacing = 0.sp,
+            modifier = Modifier.padding(start = 18.dp, top = 20.dp, bottom = 8.dp)
+        )
+
+        if (diagnostics.isEmpty()) {
+            InfoPanel(
+                text = "Playback diagnostics will appear after a stream starts.",
+                modifier = Modifier.padding(horizontal = 18.dp)
+            )
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(diagnostics, key = { "${it.channelId}-${it.channelSwitchCount}-${it.errorCount}" }) { item ->
+                    DiagnosticsRow(item)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticsRow(snapshot: PlaybackTelemetrySnapshot) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(Panel)
+            .border(1.dp, Border.copy(alpha = 0.7f), RoundedCornerShape(8.dp))
+            .padding(14.dp)
+    ) {
+        Text(
+            snapshot.channelName ?: "Unknown channel",
+            color = TextPrimary,
+            fontWeight = FontWeight.Bold,
+            fontSize = 14.sp,
+            letterSpacing = 0.sp
+        )
+        Row(
+            modifier = Modifier.padding(top = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text("Start ${snapshot.startupMs?.let { "${it}ms" } ?: "..."}", color = TextSecondary, fontSize = 12.sp, letterSpacing = 0.sp)
+            Text("Rebuf ${snapshot.rebufferCount}", color = TextSecondary, fontSize = 12.sp, letterSpacing = 0.sp)
+            Text("Switch ${snapshot.channelSwitchCount}", color = TextSecondary, fontSize = 12.sp, letterSpacing = 0.sp)
+            Text("Err ${snapshot.errorCount}", color = TextSecondary, fontSize = 12.sp, letterSpacing = 0.sp)
+        }
+        snapshot.lastError?.let {
+            Text(
+                it,
+                color = Color(0xFFFFA3A3),
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                letterSpacing = 0.sp,
+                modifier = Modifier.padding(top = 8.dp)
+            )
         }
     }
 }
