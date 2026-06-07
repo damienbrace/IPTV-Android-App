@@ -29,6 +29,9 @@ interface IptvDao {
     @Query("DELETE FROM channels WHERE playlistId = :playlistId")
     suspend fun deleteChannelsForPlaylist(playlistId: String)
 
+    @Query("DELETE FROM epg_programs WHERE channelId IN (:channelIds)")
+    suspend fun deleteProgramsForChannels(channelIds: List<String>)
+
     @Query("UPDATE channels SET favorite = :favorite WHERE id = :channelId")
     suspend fun setFavorite(channelId: String, favorite: Boolean)
 
@@ -42,5 +45,15 @@ interface IptvDao {
     suspend fun replaceChannelsForPlaylist(playlistId: String, channels: List<ChannelEntity>) {
         deleteChannelsForPlaylist(playlistId)
         upsertChannels(channels)
+    }
+
+    @Transaction
+    suspend fun replaceProgramsForChannels(channelIds: List<String>, programs: List<EpgProgramEntity>) {
+        if (channelIds.isNotEmpty()) {
+            deleteProgramsForChannels(channelIds)
+        }
+        if (programs.isNotEmpty()) {
+            upsertPrograms(programs)
+        }
     }
 }

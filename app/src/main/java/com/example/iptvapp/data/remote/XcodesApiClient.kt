@@ -2,6 +2,7 @@ package com.example.iptvapp.data.remote
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import android.util.Base64
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.net.HttpURLConnection
@@ -29,6 +30,14 @@ data class XcodesLiveStream(
     val categoryId: String,
     val streamIcon: String?,
     val epgChannelId: String?
+)
+
+data class XcodesEpgProgram(
+    val streamId: Int,
+    val title: String,
+    val description: String?,
+    val startsAtEpochMillis: Long,
+    val endsAtEpochMillis: Long
 )
 
 class XcodesApiClient {
@@ -98,6 +107,43 @@ class XcodesApiClient {
                     }
                 }
             }.filter { it.name.isNotBlank() }
+        }
+    }
+
+    suspend fun fetchShortEpg(
+        serverUrl: String,
+        username: String,
+        password: String,
+        streamId: Int,
+        limit: Int = 4
+    ): Result<List<XcodesEpgProgram>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val body = getBody(
+                buildPlayerApiUrl(
+                    serverUrl = serverUrl,
+                    username = username,
+                    password = password,
+                    action = "get_short_epg&stream_id=$streamId&limit=$limit"
+                )
+            )
+            val root = JSONObject(body)
+            val listings = root.optJSONArray("epg_listings") ?: return@runCatching emptyList()
+            buildList {
+                for (index in 0 until listings.length()) {
+                    val item = listings.getJSONObject(index)
+                    val start = item.optNullableLong("start_timestamp") ?: continue
+                    val stop = item.optNullableLong("stop_timestamp") ?: continue
+                    add(
+                        XcodesEpgProgram(
+                            streamId = streamId,
+                            title = item.optString("title").decodeMaybeBase64().ifBlank { "Live Program" },
+                            description = item.optString("description").decodeMaybeBase64().ifBlank { null },
+                            startsAtEpochMillis = start * 1_000L,
+                            endsAtEpochMillis = stop * 1_000L
+                        )
+                    )
+                }
+            }
         }
     }
 
@@ -174,5 +220,11 @@ class XcodesApiClient {
     private fun JSONObject.optNullableLong(name: String): Long? {
         val value = optString(name, "")
         return value.toLongOrNull()
+    }
+
+    private fun String.decodeMaybeBase64(): String {
+        return runCatching {
+            String(Base64.decode(this, Base64.DEFAULT), Charsets.UTF_8)
+        }.getOrElse { this }.trim()
     }
 }
