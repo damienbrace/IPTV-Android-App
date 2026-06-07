@@ -81,6 +81,8 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.PlayerView
 import com.example.iptvapp.core.playback.IptvPlayerFactory
+import com.example.iptvapp.core.playback.PlaybackTelemetryRecorder
+import com.example.iptvapp.core.playback.PlaybackTelemetrySnapshot
 import com.example.iptvapp.data.model.Channel
 import com.example.iptvapp.data.model.GuideProgram
 import com.example.iptvapp.data.model.IptvPlaylist
@@ -637,6 +639,8 @@ private fun PlayerScreen(
     val context = LocalContext.current
     var playbackState by remember { mutableStateOf(Player.STATE_IDLE) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    val telemetryRecorder = remember { PlaybackTelemetryRecorder() }
+    var telemetry by remember { mutableStateOf(telemetryRecorder.snapshot()) }
     val currentIndex = channels.indexOfFirst { it.id == channel.id }
     val previousChannel = channels.getOrNull(currentIndex - 1)
     val nextChannel = channels.getOrNull(currentIndex + 1)
@@ -649,13 +653,16 @@ private fun PlayerScreen(
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackStateValue: Int) {
                 playbackState = playbackStateValue
+                telemetry = telemetryRecorder.onPlaybackStateChanged(playbackStateValue)
                 if (playbackStateValue != Player.STATE_IDLE) {
                     errorMessage = null
                 }
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                errorMessage = error.localizedMessage ?: "Unable to play this stream."
+                val message = error.localizedMessage ?: "Unable to play this stream."
+                errorMessage = message
+                telemetry = telemetryRecorder.onError(message)
             }
         }
 
@@ -670,6 +677,7 @@ private fun PlayerScreen(
     LaunchedEffect(channel.id) {
         errorMessage = null
         playbackState = Player.STATE_BUFFERING
+        telemetry = telemetryRecorder.onChannelLoad(channel.id)
         val mediaItem = IptvPlayerFactory(context).buildLiveMediaItem(
             streamUrl = channel.streamUrl,
             channelId = channel.id,
@@ -739,6 +747,14 @@ private fun PlayerScreen(
                 )
             }
         }
+
+        PlaybackTelemetryPanel(
+            telemetry = telemetry,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(top = 76.dp, start = 14.dp, end = 14.dp)
+        )
 
         Row(
             modifier = Modifier
@@ -815,6 +831,47 @@ private fun PlayerScreen(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun PlaybackTelemetryPanel(
+    telemetry: PlaybackTelemetrySnapshot,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color.Black.copy(alpha = 0.48f))
+            .border(1.dp, Border.copy(alpha = 0.72f), RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        TelemetryValue("Start", telemetry.startupMs?.let { "${it}ms" } ?: "...")
+        TelemetryValue("Rebuf", telemetry.rebufferCount.toString())
+        TelemetryValue("Switch", telemetry.channelSwitchCount.toString())
+        TelemetryValue("Err", telemetry.errorCount.toString())
+    }
+}
+
+@Composable
+private fun TelemetryValue(label: String, value: String) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            label,
+            color = TextMuted,
+            fontSize = 10.sp,
+            letterSpacing = 0.sp
+        )
+        Text(
+            value,
+            color = TextPrimary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.sp,
+            modifier = Modifier.padding(top = 2.dp)
+        )
     }
 }
 
