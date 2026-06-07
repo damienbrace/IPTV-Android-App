@@ -119,6 +119,11 @@ object TestTags {
     const val SearchNav = "nav_search"
     const val PlaylistsNav = "nav_playlists"
     const val SettingsNav = "nav_settings"
+    const val AddPlaylistAction = "action_add_playlist"
+    const val AddPlaylistScreen = "screen_add_playlist"
+    const val ChannelRowPrefix = "channel_"
+    const val PlayerScreen = "screen_player"
+    const val PlayerBack = "player_back"
 }
 
 class MainActivity : ComponentActivity() {
@@ -487,7 +492,11 @@ private fun PlaylistsScreen(
                 )
             },
             actions = {
-                GlyphButton(kind = GlyphKind.Plus, onClick = onAddPlaylist)
+                GlyphButton(
+                    kind = GlyphKind.Plus,
+                    onClick = onAddPlaylist,
+                    modifier = Modifier.testTag(TestTags.AddPlaylistAction)
+                )
             }
         )
 
@@ -535,6 +544,7 @@ private fun AddPlaylistScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .testTag(TestTags.AddPlaylistScreen)
             .windowInsetsPadding(WindowInsets.statusBars)
             .padding(horizontal = 18.dp)
     ) {
@@ -710,6 +720,7 @@ private fun PlayerScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .testTag(TestTags.PlayerScreen)
             .background(Color.Black)
     ) {
         AndroidView(
@@ -734,7 +745,11 @@ private fun PlayerScreen(
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            GlyphButton(kind = GlyphKind.Back, onClick = onBack)
+            GlyphButton(
+                kind = GlyphKind.Back,
+                onClick = onBack,
+                modifier = Modifier.testTag(TestTags.PlayerBack)
+            )
             Column(modifier = Modifier.padding(start = 12.dp).weight(1f)) {
                 Text(
                     channel.name,
@@ -1033,6 +1048,7 @@ private fun ChannelRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .testTag("${TestTags.ChannelRowPrefix}${channel.id}")
             .height(if (compact) 62.dp else 72.dp)
             .clip(RoundedCornerShape(8.dp))
             .clickable(onClick = onPlayClick)
@@ -1676,8 +1692,12 @@ private enum class GlyphKind {
 }
 
 @Composable
-private fun GlyphButton(kind: GlyphKind, onClick: () -> Unit) {
-    IconButton(onClick = onClick, modifier = Modifier.size(36.dp)) {
+private fun GlyphButton(
+    kind: GlyphKind,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    IconButton(onClick = onClick, modifier = modifier.size(36.dp)) {
         SmallGlyph(kind = kind, tint = TextPrimary)
     }
 }

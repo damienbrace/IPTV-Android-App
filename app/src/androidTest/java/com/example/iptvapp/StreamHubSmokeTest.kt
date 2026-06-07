@@ -28,4 +28,33 @@ class StreamHubSmokeTest {
         composeRule.onNodeWithTag(TestTags.SettingsNav).performClick()
         composeRule.onNodeWithText("Settings").assertIsDisplayed()
     }
+
+    @Test
+    fun playlistAddFormOpensFromPlaylistsScreen() {
+        composeRule.onNodeWithTag(TestTags.PlaylistsNav).performClick()
+        composeRule.onNodeWithTag(TestTags.AddPlaylistAction).performClick()
+
+        composeRule.onNodeWithTag(TestTags.AddPlaylistScreen).assertIsDisplayed()
+        composeRule.onNodeWithText("XCODES Details").assertIsDisplayed()
+        composeRule.onNodeWithText("Test Connection").assertIsDisplayed()
+    }
+
+    @Test
+    fun liveChannelOpensPlayerAndReturns() {
+        composeRule.onNodeWithTag("${TestTags.ChannelRowPrefix}seven-news").performClick()
+
+        composeRule.onNodeWithTag(TestTags.PlayerScreen).assertIsDisplayed()
+        composeRule.onNodeWithText("LIVE").assertIsDisplayed()
+
+        composeRule.onNodeWithTag(TestTags.PlayerBack).performClick()
+        composeRule.onNodeWithText("StreamHub TV").assertIsDisplayed()
+    }
+
+    @Test
+    fun settingsShowsDiagnosticsSection() {
+        composeRule.onNodeWithTag(TestTags.SettingsNav).performClick()
+
+        composeRule.onNodeWithText("Diagnostics").assertIsDisplayed()
+        composeRule.onNodeWithText("Playback diagnostics will appear after a stream starts.").assertIsDisplayed()
+    }
 }
