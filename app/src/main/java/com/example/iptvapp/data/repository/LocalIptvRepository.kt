@@ -110,6 +110,18 @@ class LocalIptvRepository(
         return xcodesApiClient.testConnection(serverUrl, username, password).map { }
     }
 
+    override suspend fun refreshPlaylist(playlistId: String): Result<Unit> {
+        return runCatching {
+            val playlist = dao.getPlaylist(playlistId) ?: error("Playlist not found")
+            val password = credentialVault.decrypt(playlist.encryptedPassword)
+            refreshPlaylist(playlist, password)
+        }
+    }
+
+    override suspend fun deletePlaylist(playlistId: String) {
+        dao.deletePlaylist(playlistId)
+    }
+
     override suspend fun toggleFavorite(channelId: String) {
         val channel = dao.getChannel(channelId) ?: return
         dao.setFavorite(channelId, !channel.favorite)

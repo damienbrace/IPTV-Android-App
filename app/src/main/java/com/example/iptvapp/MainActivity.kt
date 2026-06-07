@@ -206,7 +206,9 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel()) {
                             )
                             AppScreen.Playlists -> PlaylistsScreen(
                                 playlists = homeState.playlists,
-                                onAddPlaylist = { showAddPlaylist = true }
+                                onAddPlaylist = { showAddPlaylist = true },
+                                onRefreshPlaylist = viewModel::refreshPlaylist,
+                                onDeletePlaylist = viewModel::deletePlaylist
                             )
                             AppScreen.Settings -> SettingsScreen(diagnostics = diagnostics)
                         }
@@ -460,7 +462,9 @@ private fun SearchScreen(
 @Composable
 private fun PlaylistsScreen(
     playlists: List<IptvPlaylist>,
-    onAddPlaylist: () -> Unit
+    onAddPlaylist: () -> Unit,
+    onRefreshPlaylist: (String) -> Unit,
+    onDeletePlaylist: (String) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
         AppHeader(
@@ -484,7 +488,11 @@ private fun PlaylistsScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(playlists, key = { it.id }) { playlist ->
-                    PlaylistCard(playlist = playlist)
+                    PlaylistCard(
+                        playlist = playlist,
+                        onRefresh = { onRefreshPlaylist(playlist.id) },
+                        onDelete = { onDeletePlaylist(playlist.id) }
+                    )
                 }
             }
         } else {
@@ -1352,7 +1360,12 @@ private fun EmptyPlaylistState(onAddPlaylist: () -> Unit) {
 }
 
 @Composable
-private fun PlaylistCard(playlist: IptvPlaylist, modifier: Modifier = Modifier) {
+private fun PlaylistCard(
+    playlist: IptvPlaylist,
+    modifier: Modifier = Modifier,
+    onRefresh: () -> Unit,
+    onDelete: () -> Unit
+) {
     Card(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(8.dp),
@@ -1387,7 +1400,27 @@ private fun PlaylistCard(playlist: IptvPlaylist, modifier: Modifier = Modifier) 
                     )
                 }
             }
-            SmallGlyph(kind = GlyphKind.More, tint = TextSecondary)
+            Column(horizontalAlignment = Alignment.End) {
+                OutlinedButton(
+                    onClick = onRefresh,
+                    shape = RoundedCornerShape(6.dp),
+                    border = BorderStroke(1.dp, Border),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary),
+                    modifier = Modifier.height(34.dp)
+                ) {
+                    Text("Resync", fontSize = 11.sp, letterSpacing = 0.sp)
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = onDelete,
+                    shape = RoundedCornerShape(6.dp),
+                    border = BorderStroke(1.dp, Color(0xFFFF6868).copy(alpha = 0.7f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFFA3A3)),
+                    modifier = Modifier.height(34.dp)
+                ) {
+                    Text("Delete", fontSize = 11.sp, letterSpacing = 0.sp)
+                }
+            }
         }
     }
 }

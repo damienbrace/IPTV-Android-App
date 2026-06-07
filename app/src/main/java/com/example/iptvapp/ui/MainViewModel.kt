@@ -92,6 +92,18 @@ class MainViewModel(
         _playlistSaveState.value = PlaylistSaveState.Idle
     }
 
+    fun refreshPlaylist(playlistId: String) {
+        viewModelScope.launch {
+            repository.refreshPlaylist(playlistId)
+        }
+    }
+
+    fun deletePlaylist(playlistId: String) {
+        viewModelScope.launch {
+            repository.deletePlaylist(playlistId)
+        }
+    }
+
     fun toggleFavorite(channelId: String) {
         viewModelScope.launch {
             repository.toggleFavorite(channelId)

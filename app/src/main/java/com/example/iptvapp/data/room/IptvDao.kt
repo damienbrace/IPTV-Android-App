@@ -44,6 +44,12 @@ interface IptvDao {
     @Query("SELECT * FROM playlists WHERE id = :playlistId LIMIT 1")
     suspend fun getPlaylist(playlistId: String): PlaylistEntity?
 
+    @Query("DELETE FROM playlists WHERE id = :playlistId")
+    suspend fun deletePlaylistRow(playlistId: String)
+
+    @Query("SELECT id FROM channels WHERE playlistId = :playlistId")
+    suspend fun getChannelIdsForPlaylist(playlistId: String): List<String>
+
     @Transaction
     suspend fun replaceChannelsForPlaylist(playlistId: String, channels: List<ChannelEntity>) {
         deleteChannelsForPlaylist(playlistId)
@@ -58,5 +64,13 @@ interface IptvDao {
         if (programs.isNotEmpty()) {
             upsertPrograms(programs)
         }
+    }
+
+    @Transaction
+    suspend fun deletePlaylist(playlistId: String) {
+        val channelIds = getChannelIdsForPlaylist(playlistId)
+        deleteProgramsForChannels(channelIds)
+        deleteChannelsForPlaylist(playlistId)
+        deletePlaylistRow(playlistId)
     }
 }

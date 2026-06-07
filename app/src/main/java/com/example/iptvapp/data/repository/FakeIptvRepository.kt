@@ -120,6 +120,16 @@ class FakeIptvRepository(
         return xcodesApiClient.testConnection(serverUrl, username, password).map { }
     }
 
+    override suspend fun refreshPlaylist(playlistId: String): Result<Unit> {
+        return Result.success(Unit)
+    }
+
+    override suspend fun deletePlaylist(playlistId: String) {
+        state.update { current ->
+            current.copy(playlists = current.playlists.filterNot { it.id == playlistId })
+        }
+    }
+
     override suspend fun toggleFavorite(channelId: String) {
         state.update { current ->
             val updatedChannels = current.channels.map { channel ->

@@ -21,6 +21,10 @@ interface IptvRepository {
         password: String
     ): Result<Unit>
 
+    suspend fun refreshPlaylist(playlistId: String): Result<Unit>
+
+    suspend fun deletePlaylist(playlistId: String)
+
     suspend fun toggleFavorite(channelId: String)
 
     suspend fun getChannel(channelId: String): Channel?
