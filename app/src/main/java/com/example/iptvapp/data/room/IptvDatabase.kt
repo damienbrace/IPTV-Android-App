@@ -11,7 +11,7 @@ import androidx.room.RoomDatabase
         ChannelEntity::class,
         EpgProgramEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class IptvDatabase : RoomDatabase() {
@@ -28,7 +28,7 @@ abstract class IptvDatabase : RoomDatabase() {
                     IptvDatabase::class.java,
                     "streamhub.db"
                 )
-                    .fallbackToDestructiveMigration(false)
+                    .fallbackToDestructiveMigration(true)
                     .build()
                     .also { instance = it }
             }

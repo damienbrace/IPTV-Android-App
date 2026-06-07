@@ -35,6 +35,9 @@ interface IptvDao {
     @Query("SELECT * FROM channels WHERE id = :channelId LIMIT 1")
     suspend fun getChannel(channelId: String): ChannelEntity?
 
+    @Query("SELECT * FROM playlists WHERE id = :playlistId LIMIT 1")
+    suspend fun getPlaylist(playlistId: String): PlaylistEntity?
+
     @Transaction
     suspend fun replaceChannelsForPlaylist(playlistId: String, channels: List<ChannelEntity>) {
         deleteChannelsForPlaylist(playlistId)

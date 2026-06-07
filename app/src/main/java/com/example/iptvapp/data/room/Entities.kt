@@ -26,6 +26,7 @@ data class PlaylistEntity(
 data class ChannelEntity(
     @PrimaryKey val id: String,
     val playlistId: String,
+    val streamId: Int?,
     val number: Int,
     val name: String,
     val logoUrl: String?,

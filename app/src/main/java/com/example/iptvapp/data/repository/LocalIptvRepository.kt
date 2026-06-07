@@ -11,13 +11,15 @@ import com.example.iptvapp.data.remote.XcodesLiveStream
 import com.example.iptvapp.data.room.ChannelEntity
 import com.example.iptvapp.data.room.IptvDatabase
 import com.example.iptvapp.data.room.PlaylistEntity
+import com.example.iptvapp.data.security.CredentialVault
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 
 class LocalIptvRepository(
     context: Context,
-    private val xcodesApiClient: XcodesApiClient = XcodesApiClient()
+    private val xcodesApiClient: XcodesApiClient = XcodesApiClient(),
+    private val credentialVault: CredentialVault = CredentialVault()
 ) : IptvRepository {
     private val dao = IptvDatabase.getInstance(context).iptvDao()
     private val sampleChannels = SampleIptvData.channels
@@ -27,7 +29,8 @@ class LocalIptvRepository(
         dao.observeChannels(),
         dao.observePrograms()
     ) { playlistEntities, channelEntities, _ ->
-        val channels = channelEntities.map { it.toChannel() }.ifEmpty { sampleChannels }
+        val playlistsById = playlistEntities.associateBy { it.id }
+        val channels = channelEntities.map { it.toChannel(playlistsById[it.playlistId]) }.ifEmpty { sampleChannels }
         IptvHomeState(
             channels = channels,
             guidePrograms = channels.toGuidePrograms(),
@@ -78,7 +81,7 @@ class LocalIptvRepository(
                     name = playlist.name,
                     serverUrl = playlist.serverUrl,
                     username = playlist.username,
-                    encryptedPassword = password,
+                    encryptedPassword = credentialVault.encrypt(password),
                     lastUpdatedEpochMillis = System.currentTimeMillis(),
                     connected = true
                 )
@@ -102,7 +105,8 @@ class LocalIptvRepository(
     }
 
     override suspend fun getChannel(channelId: String): Channel? {
-        return dao.getChannel(channelId)?.toChannel()
+        val channel = dao.getChannel(channelId) ?: return null
+        return channel.toChannel(dao.getPlaylist(channel.playlistId))
     }
 
     private fun XcodesLiveStream.toChannelEntity(
@@ -116,16 +120,24 @@ class LocalIptvRepository(
         return ChannelEntity(
             id = "$playlistId-live-$streamId",
             playlistId = playlistId,
+            streamId = streamId,
             number = number,
             name = name,
             logoUrl = streamIcon,
             category = category,
-            streamUrl = xcodesApiClient.buildLiveStreamUrl(serverUrl, username, password, streamId),
+            streamUrl = "",
             favorite = false
         )
     }
 
-    private fun ChannelEntity.toChannel(): Channel {
+    private fun ChannelEntity.toChannel(playlist: PlaylistEntity?): Channel {
+        val streamUrl = if (playlist != null && streamId != null) {
+            val password = credentialVault.decrypt(playlist.encryptedPassword)
+            xcodesApiClient.buildLiveStreamUrl(playlist.serverUrl, playlist.username, password, streamId)
+        } else {
+            this.streamUrl
+        }
+
         return Channel(
             id = id,
             number = number,
