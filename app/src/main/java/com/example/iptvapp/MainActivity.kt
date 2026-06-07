@@ -35,6 +35,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalTextStyle
@@ -46,10 +47,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -69,7 +72,13 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.ui.PlayerView
+import com.example.iptvapp.core.playback.IptvPlayerFactory
 import com.example.iptvapp.data.model.Channel
 import com.example.iptvapp.data.model.GuideProgram
 import com.example.iptvapp.data.model.IptvPlaylist
@@ -112,6 +121,7 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel()) {
     val homeState by viewModel.homeState.collectAsState()
     var currentScreen by remember { mutableStateOf(AppScreen.Live) }
     var showAddPlaylist by remember { mutableStateOf(false) }
+    var selectedChannel by remember { mutableStateOf<Channel?>(null) }
 
     Surface(color = AppBackground, modifier = Modifier.fillMaxSize()) {
         Box(
@@ -127,7 +137,7 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel()) {
                 containerColor = Color.Transparent,
                 contentWindowInsets = WindowInsets(0.dp),
                 bottomBar = {
-                    if (!showAddPlaylist) {
+                    if (!showAddPlaylist && selectedChannel == null) {
                         BottomNavigationBar(
                             selected = currentScreen,
                             onSelected = { currentScreen = it }
@@ -140,7 +150,13 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel()) {
                         .fillMaxSize()
                         .padding(innerPadding)
                 ) {
-                    if (showAddPlaylist) {
+                    val playingChannel = selectedChannel
+                    if (playingChannel != null) {
+                        PlayerScreen(
+                            channel = playingChannel,
+                            onBack = { selectedChannel = null }
+                        )
+                    } else if (showAddPlaylist) {
                         AddPlaylistScreen(
                             onBack = { showAddPlaylist = false },
                             onSavePlaylist = { name, serverUrl, username, password ->
@@ -153,12 +169,17 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel()) {
                             AppScreen.Live -> LiveScreen(
                                 channels = homeState.channels,
                                 categories = homeState.categories,
-                                onToggleFavorite = viewModel::toggleFavorite
+                                onToggleFavorite = viewModel::toggleFavorite,
+                                onPlayChannel = { selectedChannel = it }
                             )
-                            AppScreen.Guide -> GuideScreen(programs = homeState.guidePrograms)
+                            AppScreen.Guide -> GuideScreen(
+                                programs = homeState.guidePrograms,
+                                onPlayChannel = { selectedChannel = it }
+                            )
                             AppScreen.Search -> SearchScreen(
                                 channels = homeState.channels,
-                                recentSearches = homeState.recentSearches
+                                recentSearches = homeState.recentSearches,
+                                onPlayChannel = { selectedChannel = it }
                             )
                             AppScreen.Playlists -> PlaylistsScreen(
                                 playlists = homeState.playlists,
@@ -197,7 +218,8 @@ private fun AppHeader(
 private fun LiveScreen(
     channels: List<Channel>,
     categories: List<String>,
-    onToggleFavorite: (String) -> Unit
+    onToggleFavorite: (String) -> Unit,
+    onPlayChannel: (Channel) -> Unit
 ) {
     var selectedCategory by remember { mutableStateOf("All Channels") }
     val visibleChannels = channels.filter {
@@ -247,7 +269,8 @@ private fun LiveScreen(
                 ChannelRow(
                     channel = channel,
                     showNumber = true,
-                    onFavoriteClick = { onToggleFavorite(channel.id) }
+                    onFavoriteClick = { onToggleFavorite(channel.id) },
+                    onPlayClick = { onPlayChannel(channel) }
                 )
             }
         }
@@ -255,7 +278,10 @@ private fun LiveScreen(
 }
 
 @Composable
-private fun GuideScreen(programs: List<GuideProgram>) {
+private fun GuideScreen(
+    programs: List<GuideProgram>,
+    onPlayChannel: (Channel) -> Unit
+) {
     Column(modifier = Modifier.fillMaxSize()) {
         AppHeader(
             title = {
@@ -289,7 +315,10 @@ private fun GuideScreen(programs: List<GuideProgram>) {
                 )
             ) {
                 items(programs, key = { it.channel.number }) { program ->
-                    GuideRow(program = program)
+                    GuideRow(
+                        program = program,
+                        onPlayChannel = { onPlayChannel(program.channel) }
+                    )
                 }
             }
             Box(
@@ -307,7 +336,8 @@ private fun GuideScreen(programs: List<GuideProgram>) {
 @Composable
 private fun SearchScreen(
     channels: List<Channel>,
-    recentSearches: List<String>
+    recentSearches: List<String>,
+    onPlayChannel: (Channel) -> Unit
 ) {
     var query by remember { mutableStateOf("") }
     val resultChannels = channels.filter {
@@ -394,7 +424,11 @@ private fun SearchScreen(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             items(resultChannels.take(6), key = { it.number }) { channel ->
-                ChannelRow(channel = channel, compact = true)
+                ChannelRow(
+                    channel = channel,
+                    compact = true,
+                    onPlayClick = { onPlayChannel(channel) }
+                )
             }
         }
     }
@@ -539,6 +573,155 @@ private fun AddPlaylistScreen(
     }
 }
 
+@androidx.annotation.OptIn(UnstableApi::class)
+@Composable
+private fun PlayerScreen(channel: Channel, onBack: () -> Unit) {
+    val context = LocalContext.current
+    var playbackState by remember { mutableStateOf(Player.STATE_IDLE) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    val player = remember(channel.id) {
+        IptvPlayerFactory(context).createLivePlayer()
+    }
+
+    DisposableEffect(channel.id, player) {
+        val playerFactory = IptvPlayerFactory(context)
+        val mediaItem = playerFactory.buildLiveMediaItem(
+            streamUrl = channel.streamUrl,
+            channelId = channel.id,
+            channelName = channel.name
+        )
+
+        val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackStateValue: Int) {
+                playbackState = playbackStateValue
+                if (playbackStateValue != Player.STATE_IDLE) {
+                    errorMessage = null
+                }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                errorMessage = error.localizedMessage ?: "Unable to play this stream."
+            }
+        }
+
+        player.addListener(listener)
+        player.setMediaItem(mediaItem)
+        player.prepare()
+
+        onDispose {
+            player.removeListener(listener)
+            player.release()
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        AndroidView(
+            factory = { viewContext ->
+                PlayerView(viewContext).apply {
+                    this.player = player
+                    setUseController(true)
+                    setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
+                }
+            },
+            update = { playerView ->
+                playerView.player = player
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .background(Color.Black.copy(alpha = 0.56f))
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            GlyphButton(kind = GlyphKind.Back, onClick = onBack)
+            Column(modifier = Modifier.padding(start = 12.dp).weight(1f)) {
+                Text(
+                    channel.name,
+                    color = TextPrimary,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp,
+                    letterSpacing = 0.sp
+                )
+                Text(
+                    channel.currentProgramTime,
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                    letterSpacing = 0.sp,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(PanelSoft.copy(alpha = 0.88f))
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    "LIVE",
+                    color = AccentAlt,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.sp
+                )
+            }
+        }
+
+        if (playbackState == Player.STATE_BUFFERING || playbackState == Player.STATE_IDLE) {
+            Column(
+                modifier = Modifier.align(Alignment.Center),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                CircularProgressIndicator(color = Accent, strokeWidth = 3.dp)
+                Text(
+                    "Loading stream",
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                    letterSpacing = 0.sp,
+                    modifier = Modifier.padding(top = 14.dp)
+                )
+            }
+        }
+
+        errorMessage?.let { message ->
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .padding(18.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Panel.copy(alpha = 0.94f))
+                    .border(1.dp, Border, RoundedCornerShape(8.dp))
+                    .padding(16.dp)
+            ) {
+                Text(
+                    "Stream unavailable",
+                    color = TextPrimary,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp,
+                    letterSpacing = 0.sp
+                )
+                Text(
+                    message,
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp,
+                    letterSpacing = 0.sp,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun SettingsScreen() {
     Column(modifier = Modifier.fillMaxSize()) {
@@ -607,13 +790,15 @@ private fun ChannelRow(
     channel: Channel,
     showNumber: Boolean = false,
     compact: Boolean = false,
-    onFavoriteClick: () -> Unit = {}
+    onFavoriteClick: () -> Unit = {},
+    onPlayClick: () -> Unit = {}
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .height(if (compact) 62.dp else 72.dp)
             .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onPlayClick)
             .background(Panel.copy(alpha = 0.94f))
             .border(1.dp, Border.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
             .padding(horizontal = 12.dp),
@@ -761,11 +946,12 @@ private fun TimeStrip(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun GuideRow(program: GuideProgram) {
+private fun GuideRow(program: GuideProgram, onPlayChannel: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(72.dp),
+            .height(72.dp)
+            .clickable(onClick = onPlayChannel),
         verticalAlignment = Alignment.CenterVertically
     ) {
         LogoBadge(channel = program.channel)

@@ -112,6 +112,6 @@ class FakeIptvRepository : IptvRepository {
     }
 
     private fun sampleStream(index: Int): String {
-        return "https://example.com/live/channel-$index.m3u8"
+        return "https://storage.googleapis.com/shaka-demo-assets/angel-one-hls/hls.m3u8"
     }
 }
