@@ -5,11 +5,14 @@ import com.example.iptvapp.data.model.Channel
 import com.example.iptvapp.data.model.GuideProgram
 import com.example.iptvapp.data.model.IptvHomeState
 import com.example.iptvapp.data.model.IptvPlaylist
+import com.example.iptvapp.data.remote.XcodesApiClient
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 
-class FakeIptvRepository : IptvRepository {
+class FakeIptvRepository(
+    private val xcodesApiClient: XcodesApiClient = XcodesApiClient()
+) : IptvRepository {
     private val channels = listOf(
         Channel("seven-news", 1, "Seven News", "7", Color(0xFFE92B2B), "News", "7:00 - 8:00pm", 0.58f, sampleStream(1)),
         Channel("nine-news", 2, "9 News", "9", Color(0xFF2F9CFF), "News", "7:00 - 8:00pm", 0.58f, sampleStream(2)),
@@ -86,12 +89,7 @@ class FakeIptvRepository : IptvRepository {
         username: String,
         password: String
     ): Result<Unit> {
-        return when {
-            serverUrl.isBlank() -> Result.failure(IllegalArgumentException("Server URL is required"))
-            username.isBlank() -> Result.failure(IllegalArgumentException("Username is required"))
-            password.isBlank() -> Result.failure(IllegalArgumentException("Password is required"))
-            else -> Result.success(Unit)
-        }
+        return xcodesApiClient.testConnection(serverUrl, username, password).map { }
     }
 
     override suspend fun toggleFavorite(channelId: String) {

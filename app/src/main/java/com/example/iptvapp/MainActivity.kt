@@ -82,6 +82,7 @@ import com.example.iptvapp.core.playback.IptvPlayerFactory
 import com.example.iptvapp.data.model.Channel
 import com.example.iptvapp.data.model.GuideProgram
 import com.example.iptvapp.data.model.IptvPlaylist
+import com.example.iptvapp.ui.ConnectionTestState
 import com.example.iptvapp.ui.MainViewModel
 import com.example.iptvapp.ui.theme.IPTVAppTheme
 
@@ -119,6 +120,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun StreamHubApp(viewModel: MainViewModel = viewModel()) {
     val homeState by viewModel.homeState.collectAsState()
+    val connectionTestState by viewModel.connectionTestState.collectAsState()
     var currentScreen by remember { mutableStateOf(AppScreen.Live) }
     var showAddPlaylist by remember { mutableStateOf(false) }
     var selectedChannel by remember { mutableStateOf<Channel?>(null) }
@@ -158,7 +160,12 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel()) {
                         )
                     } else if (showAddPlaylist) {
                         AddPlaylistScreen(
-                            onBack = { showAddPlaylist = false },
+                            connectionTestState = connectionTestState,
+                            onBack = {
+                                viewModel.clearConnectionTest()
+                                showAddPlaylist = false
+                            },
+                            onTestConnection = viewModel::testPlaylistConnection,
                             onSavePlaylist = { name, serverUrl, username, password ->
                                 viewModel.addPlaylist(name, serverUrl, username, password)
                                 showAddPlaylist = false
@@ -473,7 +480,9 @@ private fun PlaylistsScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AddPlaylistScreen(
+    connectionTestState: ConnectionTestState,
     onBack: () -> Unit,
+    onTestConnection: (String, String, String) -> Unit,
     onSavePlaylist: (String, String, String, String) -> Unit
 ) {
     var playlistName by remember { mutableStateOf("My IPTV") }
@@ -509,7 +518,9 @@ private fun AddPlaylistScreen(
                 color = Color(0xFFA9A5FF),
                 fontSize = 14.sp,
                 letterSpacing = 0.sp,
-                modifier = Modifier.clickable(onClick = onBack)
+                modifier = Modifier.clickable {
+                    onSavePlaylist(playlistName, serverUrl, username, password)
+                }
             )
         }
 
@@ -555,7 +566,8 @@ private fun AddPlaylistScreen(
         Spacer(modifier = Modifier.height(14.dp))
 
         OutlinedButton(
-            onClick = {},
+            onClick = { onTestConnection(serverUrl, username, password) },
+            enabled = connectionTestState != ConnectionTestState.Testing,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(52.dp),
@@ -563,8 +575,16 @@ private fun AddPlaylistScreen(
             border = BorderStroke(1.dp, Color(0xFF736DFF)),
             colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFC7C3FF))
         ) {
-            Text("Test Connection", letterSpacing = 0.sp)
+            Text(
+                if (connectionTestState == ConnectionTestState.Testing) "Testing..." else "Test Connection",
+                letterSpacing = 0.sp
+            )
         }
+
+        ConnectionTestPanel(
+            state = connectionTestState,
+            modifier = Modifier.padding(top = 12.dp)
+        )
 
         InfoPanel(
             text = "Login details are stored on this device.",
@@ -1229,6 +1249,73 @@ private fun InfoPanel(text: String, modifier: Modifier = Modifier) {
             letterSpacing = 0.sp,
             modifier = Modifier.padding(start = 14.dp)
         )
+    }
+}
+
+@Composable
+private fun ConnectionTestPanel(state: ConnectionTestState, modifier: Modifier = Modifier) {
+    when (state) {
+        ConnectionTestState.Idle -> Unit
+        ConnectionTestState.Testing -> StatusPanel(
+            title = "Testing connection",
+            message = "Checking the XCODES server and account status.",
+            color = Accent,
+            modifier = modifier
+        )
+        ConnectionTestState.Success -> StatusPanel(
+            title = "Connection successful",
+            message = "The server accepted these XCODES details.",
+            color = Success,
+            modifier = modifier
+        )
+        is ConnectionTestState.Error -> StatusPanel(
+            title = "Connection failed",
+            message = state.message,
+            color = Color(0xFFFF6868),
+            modifier = modifier
+        )
+    }
+}
+
+@Composable
+private fun StatusPanel(
+    title: String,
+    message: String,
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(Panel)
+            .border(1.dp, color.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
+            .padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(12.dp)
+                .clip(CircleShape)
+                .background(color)
+        )
+        Column(modifier = Modifier.padding(start = 12.dp)) {
+            Text(
+                title,
+                color = TextPrimary,
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.sp,
+                letterSpacing = 0.sp
+            )
+            Text(
+                message,
+                color = TextSecondary,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                letterSpacing = 0.sp,
+                modifier = Modifier.padding(top = 3.dp)
+            )
+        }
     }
 }
 

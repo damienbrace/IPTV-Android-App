@@ -6,9 +6,18 @@ import com.example.iptvapp.data.model.IptvHomeState
 import com.example.iptvapp.data.repository.FakeIptvRepository
 import com.example.iptvapp.data.repository.IptvRepository
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+sealed interface ConnectionTestState {
+    data object Idle : ConnectionTestState
+    data object Testing : ConnectionTestState
+    data object Success : ConnectionTestState
+    data class Error(val message: String) : ConnectionTestState
+}
 
 class MainViewModel(
     private val repository: IptvRepository = FakeIptvRepository()
@@ -25,10 +34,31 @@ class MainViewModel(
         )
     )
 
+    private val _connectionTestState = MutableStateFlow<ConnectionTestState>(ConnectionTestState.Idle)
+    val connectionTestState: StateFlow<ConnectionTestState> = _connectionTestState.asStateFlow()
+
     fun addPlaylist(name: String, serverUrl: String, username: String, password: String) {
         viewModelScope.launch {
             repository.addPlaylist(name, serverUrl, username, password)
+            _connectionTestState.value = ConnectionTestState.Idle
         }
+    }
+
+    fun testPlaylistConnection(serverUrl: String, username: String, password: String) {
+        viewModelScope.launch {
+            _connectionTestState.value = ConnectionTestState.Testing
+            val result = repository.testPlaylistConnection(serverUrl, username, password)
+            _connectionTestState.value = result.fold(
+                onSuccess = { ConnectionTestState.Success },
+                onFailure = { error ->
+                    ConnectionTestState.Error(error.message ?: "Connection failed")
+                }
+            )
+        }
+    }
+
+    fun clearConnectionTest() {
+        _connectionTestState.value = ConnectionTestState.Idle
     }
 
     fun toggleFavorite(channelId: String) {
