@@ -19,6 +19,13 @@ sealed interface ConnectionTestState {
     data class Error(val message: String) : ConnectionTestState
 }
 
+sealed interface PlaylistSaveState {
+    data object Idle : PlaylistSaveState
+    data object Saving : PlaylistSaveState
+    data object Success : PlaylistSaveState
+    data class Error(val message: String) : PlaylistSaveState
+}
+
 class MainViewModel(
     private val repository: IptvRepository = FakeIptvRepository()
 ) : ViewModel() {
@@ -37,10 +44,22 @@ class MainViewModel(
     private val _connectionTestState = MutableStateFlow<ConnectionTestState>(ConnectionTestState.Idle)
     val connectionTestState: StateFlow<ConnectionTestState> = _connectionTestState.asStateFlow()
 
+    private val _playlistSaveState = MutableStateFlow<PlaylistSaveState>(PlaylistSaveState.Idle)
+    val playlistSaveState: StateFlow<PlaylistSaveState> = _playlistSaveState.asStateFlow()
+
     fun addPlaylist(name: String, serverUrl: String, username: String, password: String) {
         viewModelScope.launch {
-            repository.addPlaylist(name, serverUrl, username, password)
-            _connectionTestState.value = ConnectionTestState.Idle
+            _playlistSaveState.value = PlaylistSaveState.Saving
+            val result = repository.addPlaylist(name, serverUrl, username, password)
+            _playlistSaveState.value = result.fold(
+                onSuccess = {
+                    _connectionTestState.value = ConnectionTestState.Idle
+                    PlaylistSaveState.Success
+                },
+                onFailure = { error ->
+                    PlaylistSaveState.Error(error.message ?: "Unable to save playlist")
+                }
+            )
         }
     }
 
@@ -59,6 +78,10 @@ class MainViewModel(
 
     fun clearConnectionTest() {
         _connectionTestState.value = ConnectionTestState.Idle
+    }
+
+    fun clearPlaylistSaveState() {
+        _playlistSaveState.value = PlaylistSaveState.Idle
     }
 
     fun toggleFavorite(channelId: String) {

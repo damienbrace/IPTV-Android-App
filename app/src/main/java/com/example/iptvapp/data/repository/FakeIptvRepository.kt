@@ -6,6 +6,7 @@ import com.example.iptvapp.data.model.GuideProgram
 import com.example.iptvapp.data.model.IptvHomeState
 import com.example.iptvapp.data.model.IptvPlaylist
 import com.example.iptvapp.data.remote.XcodesApiClient
+import com.example.iptvapp.data.remote.XcodesLiveStream
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
@@ -70,18 +71,45 @@ class FakeIptvRepository(
         username: String,
         password: String
     ): Result<IptvPlaylist> {
-        val playlist = IptvPlaylist(
-            id = name.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-').ifBlank { "playlist" },
-            name = name,
-            serverUrl = serverUrl,
-            username = username,
-            lastUpdated = "Just now",
-            connected = true
-        )
-        state.update { current ->
-            current.copy(playlists = current.playlists.filterNot { it.id == playlist.id } + playlist)
+        return runCatching {
+            xcodesApiClient.testConnection(serverUrl, username, password).getOrThrow()
+            val categories = xcodesApiClient.fetchLiveCategories(serverUrl, username, password).getOrElse { emptyList() }
+            val categoryNamesById = categories.associate { it.id to it.name }
+            val liveStreams = xcodesApiClient.fetchLiveStreams(serverUrl, username, password).getOrThrow()
+            val syncedChannels = liveStreams.mapIndexed { index, stream ->
+                stream.toChannel(
+                    number = index + 1,
+                    category = categoryNamesById[stream.categoryId] ?: "Live TV",
+                    serverUrl = serverUrl,
+                    username = username,
+                    password = password
+                )
+            }
+            val playlist = IptvPlaylist(
+                id = name.toPlaylistId(),
+                name = name,
+                serverUrl = serverUrl,
+                username = username,
+                lastUpdated = "Just now",
+                connected = true
+            )
+
+            state.update { current ->
+                val nextChannels = syncedChannels.ifEmpty { current.channels }
+                current.copy(
+                    channels = nextChannels,
+                    guidePrograms = nextChannels.toGuidePrograms(),
+                    playlists = current.playlists.filterNot { it.id == playlist.id } + playlist,
+                    categories = buildList {
+                        add("All Channels")
+                        add("Favourites")
+                        addAll(nextChannels.map { it.category }.distinct().take(12))
+                    }
+                )
+            }
+
+            playlist
         }
-        return Result.success(playlist)
     }
 
     override suspend fun testPlaylistConnection(
@@ -111,5 +139,49 @@ class FakeIptvRepository(
 
     private fun sampleStream(index: Int): String {
         return "https://storage.googleapis.com/shaka-demo-assets/angel-one-hls/hls.m3u8"
+    }
+
+    private fun XcodesLiveStream.toChannel(
+        number: Int,
+        category: String,
+        serverUrl: String,
+        username: String,
+        password: String
+    ): Channel {
+        return Channel(
+            id = "live-$streamId",
+            number = number,
+            name = name,
+            logo = name.toLogoText(),
+            logoColor = Color.White,
+            category = category,
+            currentProgramTime = "Live now",
+            progress = 0f,
+            streamUrl = xcodesApiClient.buildLiveStreamUrl(serverUrl, username, password, streamId)
+        )
+    }
+
+    private fun List<Channel>.toGuidePrograms(): List<GuideProgram> {
+        return take(80).map { channel ->
+            GuideProgram(
+                channel = channel,
+                primaryTitle = channel.name,
+                secondaryTitle = "",
+                startsAtHalfHour = false
+            )
+        }
+    }
+
+    private fun String.toPlaylistId(): String {
+        return lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-').ifBlank { "playlist" }
+    }
+
+    private fun String.toLogoText(): String {
+        val words = trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+        return when {
+            words.isEmpty() -> "TV"
+            words.size == 1 -> words.first().take(3).uppercase()
+            else -> words.take(2).joinToString("") { it.take(1) }.uppercase()
+        }
     }
 }

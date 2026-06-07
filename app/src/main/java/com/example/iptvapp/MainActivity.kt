@@ -48,6 +48,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -84,6 +85,7 @@ import com.example.iptvapp.data.model.GuideProgram
 import com.example.iptvapp.data.model.IptvPlaylist
 import com.example.iptvapp.ui.ConnectionTestState
 import com.example.iptvapp.ui.MainViewModel
+import com.example.iptvapp.ui.PlaylistSaveState
 import com.example.iptvapp.ui.theme.IPTVAppTheme
 
 private enum class AppScreen(val title: String) {
@@ -121,6 +123,7 @@ class MainActivity : ComponentActivity() {
 private fun StreamHubApp(viewModel: MainViewModel = viewModel()) {
     val homeState by viewModel.homeState.collectAsState()
     val connectionTestState by viewModel.connectionTestState.collectAsState()
+    val playlistSaveState by viewModel.playlistSaveState.collectAsState()
     var currentScreen by remember { mutableStateOf(AppScreen.Live) }
     var showAddPlaylist by remember { mutableStateOf(false) }
     var selectedChannel by remember { mutableStateOf<Channel?>(null) }
@@ -161,13 +164,18 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel()) {
                     } else if (showAddPlaylist) {
                         AddPlaylistScreen(
                             connectionTestState = connectionTestState,
+                            playlistSaveState = playlistSaveState,
                             onBack = {
                                 viewModel.clearConnectionTest()
+                                viewModel.clearPlaylistSaveState()
                                 showAddPlaylist = false
                             },
                             onTestConnection = viewModel::testPlaylistConnection,
                             onSavePlaylist = { name, serverUrl, username, password ->
                                 viewModel.addPlaylist(name, serverUrl, username, password)
+                            },
+                            onSaveComplete = {
+                                viewModel.clearPlaylistSaveState()
                                 showAddPlaylist = false
                             }
                         )
@@ -481,15 +489,23 @@ private fun PlaylistsScreen(
 @Composable
 private fun AddPlaylistScreen(
     connectionTestState: ConnectionTestState,
+    playlistSaveState: PlaylistSaveState,
     onBack: () -> Unit,
     onTestConnection: (String, String, String) -> Unit,
-    onSavePlaylist: (String, String, String, String) -> Unit
+    onSavePlaylist: (String, String, String, String) -> Unit,
+    onSaveComplete: () -> Unit
 ) {
     var playlistName by remember { mutableStateOf("My IPTV") }
     var serverUrl by remember { mutableStateOf("http://server.com:8080") }
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var passwordVisible by remember { mutableStateOf(false) }
+
+    LaunchedEffect(playlistSaveState) {
+        if (playlistSaveState == PlaylistSaveState.Success) {
+            onSaveComplete()
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -519,7 +535,9 @@ private fun AddPlaylistScreen(
                 fontSize = 14.sp,
                 letterSpacing = 0.sp,
                 modifier = Modifier.clickable {
-                    onSavePlaylist(playlistName, serverUrl, username, password)
+                    if (playlistSaveState != PlaylistSaveState.Saving) {
+                        onSavePlaylist(playlistName, serverUrl, username, password)
+                    }
                 }
             )
         }
@@ -554,14 +572,25 @@ private fun AddPlaylistScreen(
 
         Button(
             onClick = { onSavePlaylist(playlistName, serverUrl, username, password) },
+            enabled = playlistSaveState != PlaylistSaveState.Saving,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(52.dp),
             shape = RoundedCornerShape(6.dp),
             colors = ButtonDefaults.buttonColors(containerColor = Accent)
         ) {
-            Text("Save Playlist", color = TextPrimary, fontWeight = FontWeight.Bold, letterSpacing = 0.sp)
+            Text(
+                if (playlistSaveState == PlaylistSaveState.Saving) "Syncing Playlist..." else "Save Playlist",
+                color = TextPrimary,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.sp
+            )
         }
+
+        PlaylistSavePanel(
+            state = playlistSaveState,
+            modifier = Modifier.padding(top = 12.dp)
+        )
 
         Spacer(modifier = Modifier.height(14.dp))
 
@@ -1270,6 +1299,26 @@ private fun ConnectionTestPanel(state: ConnectionTestState, modifier: Modifier =
         )
         is ConnectionTestState.Error -> StatusPanel(
             title = "Connection failed",
+            message = state.message,
+            color = Color(0xFFFF6868),
+            modifier = modifier
+        )
+    }
+}
+
+@Composable
+private fun PlaylistSavePanel(state: PlaylistSaveState, modifier: Modifier = Modifier) {
+    when (state) {
+        PlaylistSaveState.Idle,
+        PlaylistSaveState.Success -> Unit
+        PlaylistSaveState.Saving -> StatusPanel(
+            title = "Syncing playlist",
+            message = "Fetching live categories and channels.",
+            color = Accent,
+            modifier = modifier
+        )
+        is PlaylistSaveState.Error -> StatusPanel(
+            title = "Save failed",
             message = state.message,
             color = Color(0xFFFF6868),
             modifier = modifier
