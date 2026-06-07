@@ -2,13 +2,13 @@ package com.example.iptvapp.data.remote
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import android.util.Base64
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.util.Base64
 
 data class XcodesConnectionStatus(
     val username: String,
@@ -126,24 +126,7 @@ class XcodesApiClient {
                     action = "get_short_epg&stream_id=$streamId&limit=$limit"
                 )
             )
-            val root = JSONObject(body)
-            val listings = root.optJSONArray("epg_listings") ?: return@runCatching emptyList()
-            buildList {
-                for (index in 0 until listings.length()) {
-                    val item = listings.getJSONObject(index)
-                    val start = item.optNullableLong("start_timestamp") ?: continue
-                    val stop = item.optNullableLong("stop_timestamp") ?: continue
-                    add(
-                        XcodesEpgProgram(
-                            streamId = streamId,
-                            title = item.optString("title").decodeMaybeBase64().ifBlank { "Live Program" },
-                            description = item.optString("description").decodeMaybeBase64().ifBlank { null },
-                            startsAtEpochMillis = start * 1_000L,
-                            endsAtEpochMillis = stop * 1_000L
-                        )
-                    )
-                }
-            }
+            parseShortEpgBody(body, streamId)
         }
     }
 
@@ -199,7 +182,7 @@ class XcodesApiClient {
         return URLEncoder.encode(value, StandardCharsets.UTF_8.name())
     }
 
-    private fun parseConnectionStatus(body: String): XcodesConnectionStatus {
+    internal fun parseConnectionStatus(body: String): XcodesConnectionStatus {
         val root = JSONObject(body)
         val userInfo = root.optJSONObject("user_info") ?: error("Missing user_info in XCODES response")
         return XcodesConnectionStatus(
@@ -210,6 +193,27 @@ class XcodesApiClient {
             maxConnections = userInfo.optNullableInt("max_connections"),
             expiresAtEpochSeconds = userInfo.optNullableLong("exp_date")
         )
+    }
+
+    internal fun parseShortEpgBody(body: String, streamId: Int): List<XcodesEpgProgram> {
+        val root = JSONObject(body)
+        val listings = root.optJSONArray("epg_listings") ?: return emptyList()
+        return buildList {
+            for (index in 0 until listings.length()) {
+                val item = listings.getJSONObject(index)
+                val start = item.optNullableLong("start_timestamp") ?: continue
+                val stop = item.optNullableLong("stop_timestamp") ?: continue
+                add(
+                    XcodesEpgProgram(
+                        streamId = streamId,
+                        title = item.optString("title").decodeMaybeBase64().ifBlank { "Live Program" },
+                        description = item.optString("description").decodeMaybeBase64().ifBlank { null },
+                        startsAtEpochMillis = start * 1_000L,
+                        endsAtEpochMillis = stop * 1_000L
+                    )
+                )
+            }
+        }
     }
 
     private fun JSONObject.optNullableInt(name: String): Int? {
@@ -224,7 +228,7 @@ class XcodesApiClient {
 
     private fun String.decodeMaybeBase64(): String {
         return runCatching {
-            String(Base64.decode(this, Base64.DEFAULT), Charsets.UTF_8)
+            String(Base64.getDecoder().decode(this), Charsets.UTF_8)
         }.getOrElse { this }.trim()
     }
 }

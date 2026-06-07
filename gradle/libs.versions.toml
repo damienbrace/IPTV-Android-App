@@ -11,6 +11,7 @@ ksp = "2.2.10-2.0.2"
 composeBom = "2026.02.01"
 coil = "3.4.0"
 datastore = "1.2.1"
+json = "20260522"
 lifecycleViewmodel = "2.10.0"
 media3 = "1.6.1"
 room = "2.8.4"
@@ -19,6 +20,7 @@ work = "2.11.2"
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
+org-json = { group = "org.json", name = "json", version.ref = "json" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycleRuntimeKtx" }

@@ -28,7 +28,9 @@ object PlaybackDiagnosticsStore {
     }
 }
 
-class PlaybackTelemetryRecorder {
+class PlaybackTelemetryRecorder(
+    private val timeProvider: () -> Long = { SystemClock.elapsedRealtime() }
+) {
     private var currentChannelId: String? = null
     private var loadStartedAtMs: Long = 0L
     private var readyForCurrentItem = false
@@ -38,7 +40,7 @@ class PlaybackTelemetryRecorder {
     fun onChannelLoad(channelId: String, channelName: String): PlaybackTelemetrySnapshot {
         val previousChannelId = currentChannelId
         currentChannelId = channelId
-        loadStartedAtMs = SystemClock.elapsedRealtime()
+        loadStartedAtMs = timeProvider()
         readyForCurrentItem = false
         lastState = Player.STATE_BUFFERING
         snapshot = snapshot.copy(
@@ -59,7 +61,7 @@ class PlaybackTelemetryRecorder {
 
         if (state == Player.STATE_READY && !readyForCurrentItem) {
             readyForCurrentItem = true
-            snapshot = snapshot.copy(startupMs = SystemClock.elapsedRealtime() - loadStartedAtMs)
+            snapshot = snapshot.copy(startupMs = timeProvider() - loadStartedAtMs)
         }
 
         lastState = state
