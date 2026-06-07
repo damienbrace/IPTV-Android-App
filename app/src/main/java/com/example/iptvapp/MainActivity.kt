@@ -45,6 +45,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -68,6 +69,11 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.iptvapp.data.model.Channel
+import com.example.iptvapp.data.model.GuideProgram
+import com.example.iptvapp.data.model.IptvPlaylist
+import com.example.iptvapp.ui.MainViewModel
 import com.example.iptvapp.ui.theme.IPTVAppTheme
 
 private enum class AppScreen(val title: String) {
@@ -77,24 +83,6 @@ private enum class AppScreen(val title: String) {
     Playlists("Playlists"),
     Settings("Settings")
 }
-
-private data class Channel(
-    val number: Int,
-    val name: String,
-    val logo: String,
-    val logoColor: Color,
-    val category: String,
-    val time: String,
-    val progress: Float,
-    val favorite: Boolean = false
-)
-
-private data class GuideProgram(
-    val channel: Channel,
-    val primaryTitle: String,
-    val secondaryTitle: String,
-    val startsAtHalfHour: Boolean = false
-)
 
 private val AppBackground = Color(0xFF050A0F)
 private val Panel = Color(0xFF101722)
@@ -106,47 +94,6 @@ private val TextPrimary = Color(0xFFF8FAFF)
 private val TextSecondary = Color(0xFFB8C1D4)
 private val TextMuted = Color(0xFF7D879A)
 private val Success = Color(0xFF36D37E)
-
-private val channels = listOf(
-    Channel(1, "Seven News", "7", Color(0xFFE92B2B), "News", "7:00 - 8:00pm", 0.58f),
-    Channel(2, "9 News", "9", Color(0xFF2F9CFF), "News", "7:00 - 8:00pm", 0.58f),
-    Channel(3, "10 News First", "10", Color(0xFF286CFF), "News", "7:00 - 8:00pm", 0.58f),
-    Channel(4, "ABC News", "ABC", Color(0xFFF2F5FA), "News", "7:00 - 8:00pm", 0.54f, favorite = true),
-    Channel(5, "SBS World News", "SBS", Color(0xFFF2F5FA), "News", "7:00 - 8:00pm", 0.57f, favorite = true),
-    Channel(6, "Sky News Live", "sky", Color(0xFFE4E8F0), "News", "7:00 - 8:00pm", 0.52f),
-    Channel(7, "ESPN Live", "ESPN", Color(0xFFFF3838), "Sports", "6:30 - 8:30pm", 0.64f),
-    Channel(8, "Fox Sports 503", "FOX", Color(0xFFF2F5FA), "Sports", "7:00 - 9:00pm", 0.47f),
-    Channel(9, "Nickelodeon", "nick", Color(0xFFFF981F), "Kids", "7:00 - 8:00pm", 0.33f),
-    Channel(10, "Discovery Channel", "D", Color(0xFFDDE3EB), "Lifestyle", "7:00 - 8:00pm", 0.42f)
-)
-
-private val guidePrograms = channels.mapIndexed { index, channel ->
-    GuideProgram(
-        channel = channel,
-        primaryTitle = when (channel.name) {
-            "Seven News" -> "Seven News"
-            "9 News" -> "9 News"
-            "10 News First" -> "The Project"
-            "ABC News" -> "7.30"
-            "SBS World News" -> "World News"
-            "Sky News Live" -> "Sky News Live"
-            "ESPN Live" -> "SportsCenter"
-            "Fox Sports 503" -> "Live: NRL 360"
-            "Nickelodeon" -> "SpongeBob SquarePants"
-            else -> "Gold Rush"
-        },
-        secondaryTitle = when (index) {
-            0 -> "Home and Away"
-            1 -> "A Current Affair"
-            2 -> "The Cheap Seats"
-            3 -> "Question Time"
-            4 -> "Inside Story"
-            8 -> "The Loud House"
-            else -> ""
-        },
-        startsAtHalfHour = index % 3 == 2
-    )
-}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -161,7 +108,8 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun StreamHubApp() {
+private fun StreamHubApp(viewModel: MainViewModel = viewModel()) {
+    val homeState by viewModel.homeState.collectAsState()
     var currentScreen by remember { mutableStateOf(AppScreen.Live) }
     var showAddPlaylist by remember { mutableStateOf(false) }
 
@@ -193,13 +141,29 @@ private fun StreamHubApp() {
                         .padding(innerPadding)
                 ) {
                     if (showAddPlaylist) {
-                        AddPlaylistScreen(onBack = { showAddPlaylist = false })
+                        AddPlaylistScreen(
+                            onBack = { showAddPlaylist = false },
+                            onSavePlaylist = { name, serverUrl, username, password ->
+                                viewModel.addPlaylist(name, serverUrl, username, password)
+                                showAddPlaylist = false
+                            }
+                        )
                     } else {
                         when (currentScreen) {
-                            AppScreen.Live -> LiveScreen()
-                            AppScreen.Guide -> GuideScreen()
-                            AppScreen.Search -> SearchScreen()
-                            AppScreen.Playlists -> PlaylistsScreen(onAddPlaylist = { showAddPlaylist = true })
+                            AppScreen.Live -> LiveScreen(
+                                channels = homeState.channels,
+                                categories = homeState.categories,
+                                onToggleFavorite = viewModel::toggleFavorite
+                            )
+                            AppScreen.Guide -> GuideScreen(programs = homeState.guidePrograms)
+                            AppScreen.Search -> SearchScreen(
+                                channels = homeState.channels,
+                                recentSearches = homeState.recentSearches
+                            )
+                            AppScreen.Playlists -> PlaylistsScreen(
+                                playlists = homeState.playlists,
+                                onAddPlaylist = { showAddPlaylist = true }
+                            )
                             AppScreen.Settings -> SettingsScreen()
                         }
                     }
@@ -230,9 +194,12 @@ private fun AppHeader(
 }
 
 @Composable
-private fun LiveScreen() {
+private fun LiveScreen(
+    channels: List<Channel>,
+    categories: List<String>,
+    onToggleFavorite: (String) -> Unit
+) {
     var selectedCategory by remember { mutableStateOf("All Channels") }
-    val categories = listOf("All Channels", "Favourites", "News", "Sports", "Kids")
     val visibleChannels = channels.filter {
         selectedCategory == "All Channels" ||
             selectedCategory == it.category ||
@@ -260,7 +227,7 @@ private fun LiveScreen() {
         )
 
         CategoryTabs(
-            categories = categories,
+            categories = categories.ifEmpty { listOf("All Channels") },
             selected = selectedCategory,
             onSelected = { selectedCategory = it },
             modifier = Modifier.padding(start = 18.dp, end = 18.dp, bottom = 8.dp)
@@ -277,14 +244,18 @@ private fun LiveScreen() {
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             items(visibleChannels, key = { it.number }) { channel ->
-                ChannelRow(channel = channel, showNumber = true)
+                ChannelRow(
+                    channel = channel,
+                    showNumber = true,
+                    onFavoriteClick = { onToggleFavorite(channel.id) }
+                )
             }
         }
     }
 }
 
 @Composable
-private fun GuideScreen() {
+private fun GuideScreen(programs: List<GuideProgram>) {
     Column(modifier = Modifier.fillMaxSize()) {
         AppHeader(
             title = {
@@ -317,7 +288,7 @@ private fun GuideScreen() {
                     bottom = 16.dp
                 )
             ) {
-                items(guidePrograms, key = { it.channel.number }) { program ->
+                items(programs, key = { it.channel.number }) { program ->
                     GuideRow(program = program)
                 }
             }
@@ -334,9 +305,11 @@ private fun GuideScreen() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SearchScreen() {
+private fun SearchScreen(
+    channels: List<Channel>,
+    recentSearches: List<String>
+) {
     var query by remember { mutableStateOf("") }
-    val recent = listOf("Seven", "ESPN", "Discovery", "News", "Sports")
     val resultChannels = channels.filter {
         query.isBlank() || it.name.contains(query, ignoreCase = true) || it.category.contains(query, ignoreCase = true)
     }
@@ -387,7 +360,7 @@ private fun SearchScreen() {
             modifier = Modifier.padding(horizontal = 18.dp),
             verticalArrangement = Arrangement.spacedBy(1.dp)
         ) {
-            recent.forEach { item ->
+            recentSearches.forEach { item ->
                 RecentSearchRow(label = item)
             }
         }
@@ -428,9 +401,10 @@ private fun SearchScreen() {
 }
 
 @Composable
-private fun PlaylistsScreen(onAddPlaylist: () -> Unit) {
-    val hasPlaylist = remember { mutableStateOf(false) }
-
+private fun PlaylistsScreen(
+    playlists: List<IptvPlaylist>,
+    onAddPlaylist: () -> Unit
+) {
     Column(modifier = Modifier.fillMaxSize()) {
         AppHeader(
             title = {
@@ -447,8 +421,15 @@ private fun PlaylistsScreen(onAddPlaylist: () -> Unit) {
             }
         )
 
-        if (hasPlaylist.value) {
-            PlaylistCard(modifier = Modifier.padding(horizontal = 18.dp))
+        if (playlists.isNotEmpty()) {
+            LazyColumn(
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(playlists, key = { it.id }) { playlist ->
+                    PlaylistCard(playlist = playlist)
+                }
+            }
         } else {
             EmptyPlaylistState(onAddPlaylist = onAddPlaylist)
         }
@@ -457,7 +438,10 @@ private fun PlaylistsScreen(onAddPlaylist: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AddPlaylistScreen(onBack: () -> Unit) {
+private fun AddPlaylistScreen(
+    onBack: () -> Unit,
+    onSavePlaylist: (String, String, String, String) -> Unit
+) {
     var playlistName by remember { mutableStateOf("My IPTV") }
     var serverUrl by remember { mutableStateOf("http://server.com:8080") }
     var username by remember { mutableStateOf("") }
@@ -524,7 +508,7 @@ private fun AddPlaylistScreen(onBack: () -> Unit) {
         Spacer(modifier = Modifier.height(18.dp))
 
         Button(
-            onClick = onBack,
+            onClick = { onSavePlaylist(playlistName, serverUrl, username, password) },
             modifier = Modifier
                 .fillMaxWidth()
                 .height(52.dp),
@@ -622,7 +606,8 @@ private fun CategoryTabs(
 private fun ChannelRow(
     channel: Channel,
     showNumber: Boolean = false,
-    compact: Boolean = false
+    compact: Boolean = false,
+    onFavoriteClick: () -> Unit = {}
 ) {
     Row(
         modifier = Modifier
@@ -657,7 +642,7 @@ private fun ChannelRow(
                 letterSpacing = 0.sp
             )
             Text(
-                channel.time,
+                channel.currentProgramTime,
                 color = TextSecondary,
                 fontSize = 12.sp,
                 letterSpacing = 0.sp,
@@ -668,7 +653,9 @@ private fun ChannelRow(
             }
         }
         if (channel.favorite) {
-            SmallGlyph(kind = GlyphKind.Star, tint = TextSecondary)
+            Box(modifier = Modifier.clickable(onClick = onFavoriteClick)) {
+                SmallGlyph(kind = GlyphKind.Star, tint = TextSecondary)
+            }
         } else {
             PlayButton()
         }
@@ -789,10 +776,10 @@ private fun GuideRow(program: GuideProgram) {
                 .fillMaxHeight()
         ) {
             if (program.startsAtHalfHour) {
-                ProgramBlock(title = program.primaryTitle, time = program.channel.time, modifier = Modifier.weight(1f))
+                ProgramBlock(title = program.primaryTitle, time = program.channel.currentProgramTime, modifier = Modifier.weight(1f))
                 ProgramBlock(title = program.secondaryTitle, time = "7:30 - 8:30pm", modifier = Modifier.weight(1f))
             } else {
-                ProgramBlock(title = program.primaryTitle, time = program.channel.time, modifier = Modifier.weight(1.35f))
+                ProgramBlock(title = program.primaryTitle, time = program.channel.currentProgramTime, modifier = Modifier.weight(1.35f))
                 if (program.secondaryTitle.isNotBlank()) {
                     ProgramBlock(title = program.secondaryTitle, time = "8:00 - 8:30pm", modifier = Modifier.weight(0.85f))
                 }
@@ -950,7 +937,7 @@ private fun EmptyPlaylistState(onAddPlaylist: () -> Unit) {
 }
 
 @Composable
-private fun PlaylistCard(modifier: Modifier = Modifier) {
+private fun PlaylistCard(playlist: IptvPlaylist, modifier: Modifier = Modifier) {
     Card(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(8.dp),
@@ -968,15 +955,21 @@ private fun PlaylistCard(modifier: Modifier = Modifier) {
                 SmallGlyph(kind = GlyphKind.List, tint = TextPrimary)
             }
             Column(modifier = Modifier.weight(1f).padding(start = 14.dp)) {
-                Text("My IPTV", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp, letterSpacing = 0.sp)
-                Text("http://server.com:8080", color = TextSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 3.dp), letterSpacing = 0.sp)
-                Text("Username: user123", color = TextSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp), letterSpacing = 0.sp)
-                Text("Last updated: 21 May 2024   9:41 AM", color = TextSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp), letterSpacing = 0.sp)
+                Text(playlist.name, color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp, letterSpacing = 0.sp)
+                Text(playlist.serverUrl, color = TextSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 3.dp), letterSpacing = 0.sp)
+                Text("Username: ${playlist.username}", color = TextSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp), letterSpacing = 0.sp)
+                Text("Last updated: ${playlist.lastUpdated}", color = TextSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp), letterSpacing = 0.sp)
                 Row(modifier = Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Box(modifier = Modifier.size(14.dp).clip(CircleShape).background(Success), contentAlignment = Alignment.Center) {
                         SmallGlyph(kind = GlyphKind.Check, tint = AppBackground, modifier = Modifier.size(9.dp))
                     }
-                    Text("Connected", color = Success, fontSize = 12.sp, modifier = Modifier.padding(start = 7.dp), letterSpacing = 0.sp)
+                    Text(
+                        if (playlist.connected) "Connected" else "Disconnected",
+                        color = Success,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(start = 7.dp),
+                        letterSpacing = 0.sp
+                    )
                 }
             }
             SmallGlyph(kind = GlyphKind.More, tint = TextSecondary)
