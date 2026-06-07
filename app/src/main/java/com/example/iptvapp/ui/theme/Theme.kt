@@ -1,8 +1,6 @@
 package com.example.iptvapp.ui.theme
 
-import android.app.Activity
 import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
@@ -12,15 +10,19 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 
 private val DarkColorScheme = darkColorScheme(
-    primary = Purple80,
-    secondary = PurpleGrey80,
-    tertiary = Pink80
+    primary = Blue80,
+    secondary = Cyan80,
+    tertiary = Green80,
+    background = androidx.compose.ui.graphics.Color(0xFF050A0F),
+    surface = androidx.compose.ui.graphics.Color(0xFF101722),
+    onBackground = androidx.compose.ui.graphics.Color(0xFFF8FAFF),
+    onSurface = androidx.compose.ui.graphics.Color(0xFFF8FAFF)
 )
 
 private val LightColorScheme = lightColorScheme(
-    primary = Purple40,
-    secondary = PurpleGrey40,
-    tertiary = Pink40
+    primary = Blue40,
+    secondary = Cyan40,
+    tertiary = Green40
 
     /* Other default colors to override
     background = Color(0xFFFFFBFE),
@@ -35,9 +37,9 @@ private val LightColorScheme = lightColorScheme(
 
 @Composable
 fun IPTVAppTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    darkTheme: Boolean = true,
     // Dynamic color is available on Android 12+
-    dynamicColor: Boolean = true,
+    dynamicColor: Boolean = false,
     content: @Composable () -> Unit
 ) {
     val colorScheme = when {
