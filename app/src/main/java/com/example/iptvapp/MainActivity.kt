@@ -64,6 +64,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -87,6 +88,7 @@ import com.example.iptvapp.ui.ConnectionTestState
 import com.example.iptvapp.ui.MainViewModel
 import com.example.iptvapp.ui.PlaylistSaveState
 import com.example.iptvapp.ui.theme.IPTVAppTheme
+import coil3.compose.AsyncImage
 
 private enum class AppScreen(val title: String) {
     Live("Live TV"),
@@ -904,13 +906,22 @@ private fun LogoBadge(channel: Channel) {
             .clip(RoundedCornerShape(7.dp)),
         contentAlignment = Alignment.Center
     ) {
-        Text(
-            channel.logo,
-            color = channel.logoColor,
-            fontSize = if (channel.logo.length > 3) 14.sp else 26.sp,
-            fontWeight = FontWeight.Black,
-            letterSpacing = 0.sp
-        )
+        if (!channel.logoUrl.isNullOrBlank()) {
+            AsyncImage(
+                model = channel.logoUrl,
+                contentDescription = channel.name,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit
+            )
+        } else {
+            Text(
+                channel.logo,
+                color = channel.logoColor,
+                fontSize = if (channel.logo.length > 3) 14.sp else 26.sp,
+                fontWeight = FontWeight.Black,
+                letterSpacing = 0.sp
+            )
+        }
     }
 }
 

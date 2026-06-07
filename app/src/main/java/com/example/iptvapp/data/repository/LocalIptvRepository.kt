@@ -159,6 +159,7 @@ class LocalIptvRepository(
             currentProgramTime = "Live now",
             progress = 0f,
             streamUrl = streamUrl,
+            logoUrl = logoUrl,
             favorite = favorite
         )
     }

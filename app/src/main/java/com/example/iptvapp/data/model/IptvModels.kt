@@ -12,6 +12,7 @@ data class Channel(
     val currentProgramTime: String,
     val progress: Float,
     val streamUrl: String,
+    val logoUrl: String? = null,
     val favorite: Boolean = false
 )
 
