@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -70,6 +71,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -91,12 +93,16 @@ import com.example.iptvapp.data.model.IptvPlaylist
 import com.example.iptvapp.ui.ConnectionTestState
 import com.example.iptvapp.ui.MainViewModel
 import com.example.iptvapp.ui.PlaylistSaveState
+import com.example.iptvapp.ui.PlaylistRefreshState
 import com.example.iptvapp.ui.theme.IPTVAppTheme
 import coil3.compose.AsyncImage
+import kotlinx.coroutines.delay
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 
 private enum class AppScreen(val title: String) {
     Live("Live TV"),
-    Guide("Guide"),
     Search("Search"),
     Playlists("Playlists"),
     Settings("Settings")
@@ -112,16 +118,17 @@ private val TextPrimary = Color(0xFFF8FAFF)
 private val TextSecondary = Color(0xFFB8C1D4)
 private val TextMuted = Color(0xFF7D879A)
 private val Success = Color(0xFF36D37E)
+private val TimeSlotFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("h:mm a")
 
 object TestTags {
     const val LiveNav = "nav_live"
-    const val GuideNav = "nav_guide"
     const val SearchNav = "nav_search"
     const val PlaylistsNav = "nav_playlists"
     const val SettingsNav = "nav_settings"
     const val AddPlaylistAction = "action_add_playlist"
     const val AddPlaylistScreen = "screen_add_playlist"
     const val ChannelRowPrefix = "channel_"
+    const val GroupRowPrefix = "group_"
     const val PlayerScreen = "screen_player"
     const val PlayerBack = "player_back"
 }
@@ -139,10 +146,11 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun StreamHubApp(viewModel: MainViewModel = viewModel()) {
+private fun StreamHubApp(viewModel: MainViewModel = viewModel(factory = MainViewModel.Factory)) {
     val homeState by viewModel.homeState.collectAsState()
     val connectionTestState by viewModel.connectionTestState.collectAsState()
     val playlistSaveState by viewModel.playlistSaveState.collectAsState()
+    val playlistRefreshState by viewModel.playlistRefreshState.collectAsState()
     val diagnostics by PlaybackDiagnosticsStore.recentSnapshots.collectAsState()
     var currentScreen by remember { mutableStateOf(AppScreen.Live) }
     var showAddPlaylist by remember { mutableStateOf(false) }
@@ -205,12 +213,9 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel()) {
                         when (currentScreen) {
                             AppScreen.Live -> LiveScreen(
                                 channels = homeState.channels,
+                                guidePrograms = homeState.guidePrograms,
                                 categories = homeState.categories,
                                 onToggleFavorite = viewModel::toggleFavorite,
-                                onPlayChannel = { selectedChannel = it }
-                            )
-                            AppScreen.Guide -> GuideScreen(
-                                programs = homeState.guidePrograms,
                                 onPlayChannel = { selectedChannel = it }
                             )
                             AppScreen.Search -> SearchScreen(
@@ -220,9 +225,11 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel()) {
                             )
                             AppScreen.Playlists -> PlaylistsScreen(
                                 playlists = homeState.playlists,
+                                refreshState = playlistRefreshState,
                                 onAddPlaylist = { showAddPlaylist = true },
                                 onRefreshPlaylist = viewModel::refreshPlaylist,
-                                onDeletePlaylist = viewModel::deletePlaylist
+                                onDeletePlaylist = viewModel::deletePlaylist,
+                                onRefreshMessageShown = viewModel::clearPlaylistRefreshState
                             )
                             AppScreen.Settings -> SettingsScreen(diagnostics = diagnostics)
                         }
@@ -256,62 +263,247 @@ private fun AppHeader(
 @Composable
 private fun LiveScreen(
     channels: List<Channel>,
+    guidePrograms: List<GuideProgram>,
     categories: List<String>,
     onToggleFavorite: (String) -> Unit,
     onPlayChannel: (Channel) -> Unit
 ) {
-    var selectedCategory by remember { mutableStateOf("All Channels") }
-    val visibleChannels = channels.filter {
-        selectedCategory == "All Channels" ||
-            selectedCategory == it.category ||
-            (selectedCategory == "Favourites" && it.favorite)
+    val groups = categories.ifEmpty { listOf("All Channels") }
+    var selectedGroup by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(groups) {
+        if (selectedGroup != null && selectedGroup !in groups) {
+            selectedGroup = null
+        }
     }
+    val guideProgramsByChannelId = guidePrograms.associateBy { it.channel.id }
+    val visibleChannels = channels.filter { channel ->
+        selectedGroup == "All Channels" ||
+            selectedGroup == channel.category ||
+            (selectedGroup == "Favourites" && channel.favorite)
+    }
+    val titleText = selectedGroup ?: "Live TV"
 
     Column(modifier = Modifier.fillMaxSize()) {
         AppHeader(
             title = {
-                Text(
-                    buildAnnotatedString {
-                        append("Stream")
-                        withStyle(SpanStyle(color = Accent)) { append("Hub") }
-                        append(" TV")
-                    },
-                    color = TextPrimary,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 22.sp,
-                    letterSpacing = 0.sp
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (selectedGroup != null) {
+                        GlyphButton(kind = GlyphKind.Back, onClick = { selectedGroup = null })
+                        Spacer(modifier = Modifier.width(12.dp))
+                    }
+                    Text(
+                        titleText,
+                        color = TextPrimary,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 22.sp,
+                        letterSpacing = 0.sp
+                    )
+                }
             },
             actions = {
                 GlyphButton(kind = GlyphKind.Bell, onClick = {})
             }
         )
 
-        CategoryTabs(
-            categories = categories.ifEmpty { listOf("All Channels") },
-            selected = selectedCategory,
-            onSelected = { selectedCategory = it },
-            modifier = Modifier.padding(start = 18.dp, end = 18.dp, bottom = 8.dp)
-        )
-
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                start = 18.dp,
-                end = 18.dp,
-                top = 8.dp,
-                bottom = 14.dp
-            ),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            items(visibleChannels, key = { it.number }) { channel ->
-                ChannelRow(
-                    channel = channel,
-                    showNumber = true,
-                    onFavoriteClick = { onToggleFavorite(channel.id) },
-                    onPlayClick = { onPlayChannel(channel) }
-                )
+        if (selectedGroup == null) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                    start = 18.dp,
+                    end = 18.dp,
+                    top = 4.dp,
+                    bottom = 14.dp
+                ),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(groups, key = { it }) { group ->
+                    LiveGroupRow(
+                        group = group,
+                        channelCount = channels.count { channel ->
+                            group == "All Channels" ||
+                                group == channel.category ||
+                                (group == "Favourites" && channel.favorite)
+                        },
+                        onClick = { selectedGroup = group }
+                    )
+                }
             }
+        } else {
+            TimeStrip(modifier = Modifier.padding(start = 132.dp, end = 18.dp, bottom = 6.dp))
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                    start = 18.dp,
+                    end = 18.dp,
+                    bottom = 14.dp
+                ),
+                verticalArrangement = Arrangement.spacedBy(1.dp)
+            ) {
+                items(visibleChannels, key = { it.id }) { channel ->
+                    LiveGuideChannelRow(
+                        channel = channel,
+                        program = guideProgramsByChannelId[channel.id],
+                        onFavoriteClick = { onToggleFavorite(channel.id) },
+                        onPlayClick = { onPlayChannel(channel) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LiveGroupRow(
+    group: String,
+    channelCount: Int,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("${TestTags.GroupRowPrefix}${group.toStableTag()}")
+            .height(64.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .background(Panel.copy(alpha = 0.94f))
+            .border(1.dp, Border.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
+            .padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        SmallGlyph(
+            kind = if (group == "Favourites") GlyphKind.Star else GlyphKind.List,
+            tint = if (group == "Favourites") AccentAlt else TextSecondary,
+            modifier = Modifier.size(24.dp)
+        )
+        Column(
+            modifier = Modifier
+                .padding(start = 14.dp)
+                .weight(1f)
+        ) {
+            Text(
+                group,
+                color = TextPrimary,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 0.sp
+            )
+            Text(
+                "$channelCount channels",
+                color = TextMuted,
+                fontSize = 12.sp,
+                letterSpacing = 0.sp,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
+        SmallGlyph(kind = GlyphKind.Chevron, tint = TextMuted)
+    }
+}
+
+@Composable
+private fun LiveGuideChannelRow(
+    channel: Channel,
+    program: GuideProgram?,
+    onFavoriteClick: () -> Unit,
+    onPlayClick: () -> Unit
+) {
+    val hasProgram = !program?.primaryTitle.isNullOrBlank()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("${TestTags.ChannelRowPrefix}${channel.id}")
+            .height(82.dp)
+            .clip(RoundedCornerShape(4.dp))
+            .clickable(onClick = onPlayClick)
+            .background(Panel.copy(alpha = 0.9f))
+            .border(1.dp, Border.copy(alpha = 0.38f), RoundedCornerShape(4.dp))
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        LogoBadge(channel = channel)
+        Text(
+            channel.number.toString(),
+            color = TextMuted,
+            fontSize = 12.sp,
+            letterSpacing = 0.sp,
+            modifier = Modifier
+                .width(30.dp)
+                .padding(start = 8.dp)
+        )
+        Column(modifier = Modifier.width(116.dp)) {
+            Text(
+                channel.name,
+                color = TextPrimary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 0.sp,
+                maxLines = 2,
+                lineHeight = 16.sp,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                channel.category,
+                color = TextMuted,
+                fontSize = 11.sp,
+                letterSpacing = 0.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight()
+                .padding(start = 6.dp, top = 8.dp, bottom = 8.dp)
+                .clip(RoundedCornerShape(5.dp))
+                .background(PanelSoft.copy(alpha = 0.72f))
+                .border(1.dp, Border.copy(alpha = 0.45f), RoundedCornerShape(5.dp))
+                .padding(horizontal = 8.dp, vertical = 7.dp),
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(
+                program?.primaryTitle?.takeIf { it.isNotBlank() } ?: "No guide data",
+                color = TextPrimary,
+                fontSize = if (hasProgram) 12.sp else 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 0.sp,
+                lineHeight = 14.sp,
+                maxLines = if (hasProgram) 2 else 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (hasProgram) {
+                Text(
+                    program?.primaryTime?.takeIf { it.isNotBlank() }.orEmpty(),
+                    color = TextSecondary,
+                    fontSize = 10.sp,
+                    letterSpacing = 0.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(3.dp)
+                        .padding(top = 2.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(Color(0xFF2A3341))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(program?.progress?.coerceIn(0f, 1f) ?: 0f)
+                            .height(3.dp)
+                            .background(Accent)
+                    )
+                }
+            }
+        }
+        Box(modifier = Modifier.padding(start = 8.dp).clickable(onClick = onFavoriteClick)) {
+            SmallGlyph(
+                kind = if (channel.favorite) GlyphKind.Star else GlyphKind.Playlist,
+                tint = if (channel.favorite) AccentAlt else TextMuted,
+                modifier = Modifier.size(20.dp)
+            )
         }
     }
 }
@@ -353,7 +545,7 @@ private fun GuideScreen(
                     bottom = 16.dp
                 )
             ) {
-                items(programs, key = { it.channel.number }) { program ->
+                items(programs, key = { it.channel.id }) { program ->
                     GuideRow(
                         program = program,
                         onPlayChannel = { onPlayChannel(program.channel) }
@@ -462,7 +654,7 @@ private fun SearchScreen(
             ),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            items(resultChannels.take(6), key = { it.number }) { channel ->
+            items(resultChannels, key = { it.id }) { channel ->
                 ChannelRow(
                     channel = channel,
                     compact = true,
@@ -476,10 +668,19 @@ private fun SearchScreen(
 @Composable
 private fun PlaylistsScreen(
     playlists: List<IptvPlaylist>,
+    refreshState: PlaylistRefreshState,
     onAddPlaylist: () -> Unit,
     onRefreshPlaylist: (String) -> Unit,
-    onDeletePlaylist: (String) -> Unit
+    onDeletePlaylist: (String) -> Unit,
+    onRefreshMessageShown: () -> Unit
 ) {
+    LaunchedEffect(refreshState) {
+        if (refreshState is PlaylistRefreshState.Success || refreshState is PlaylistRefreshState.Error) {
+            delay(3_500)
+            onRefreshMessageShown()
+        }
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         AppHeader(
             title = {
@@ -508,6 +709,7 @@ private fun PlaylistsScreen(
                 items(playlists, key = { it.id }) { playlist ->
                     PlaylistCard(
                         playlist = playlist,
+                        refreshState = refreshState,
                         onRefresh = { onRefreshPlaylist(playlist.id) },
                         onDelete = { onDeletePlaylist(playlist.id) }
                     )
@@ -1013,11 +1215,11 @@ private fun CategoryTabs(
     onSelected: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Row(
+    LazyRow(
         modifier = modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        categories.forEach { category ->
+        items(categories, key = { it }) { category ->
             val selectedTab = category == selected
             Box(
                 modifier = Modifier
@@ -1102,26 +1304,34 @@ private fun ChannelRow(
 
 @Composable
 private fun LogoBadge(channel: Channel) {
+    var showFallback by remember(channel.logoUrl) {
+        mutableStateOf(channel.logoUrl.isNullOrBlank())
+    }
+
     Box(
         modifier = Modifier
             .size(46.dp)
-            .clip(RoundedCornerShape(7.dp)),
+            .clip(RoundedCornerShape(7.dp))
+            .background(PanelSoft),
         contentAlignment = Alignment.Center
     ) {
-        if (!channel.logoUrl.isNullOrBlank()) {
-            AsyncImage(
-                model = channel.logoUrl,
-                contentDescription = channel.name,
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Fit
-            )
-        } else {
+        if (showFallback) {
             Text(
                 channel.logo,
                 color = channel.logoColor,
                 fontSize = if (channel.logo.length > 3) 14.sp else 26.sp,
                 fontWeight = FontWeight.Black,
                 letterSpacing = 0.sp
+            )
+        }
+        if (!channel.logoUrl.isNullOrBlank()) {
+            AsyncImage(
+                model = channel.logoUrl,
+                contentDescription = channel.name,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit,
+                onSuccess = { showFallback = false },
+                onError = { showFallback = true }
             )
         }
     }
@@ -1193,10 +1403,19 @@ private fun DateStrip(modifier: Modifier = Modifier) {
 
 @Composable
 private fun TimeStrip(modifier: Modifier = Modifier) {
+    var now by remember { mutableStateOf(LocalDateTime.now()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            now = LocalDateTime.now()
+            delay(60_000)
+        }
+    }
+    val start = now.truncatedTo(ChronoUnit.HOURS).plusMinutes((now.minute / 30L) * 30L)
+    val slots = listOf(start, start.plusMinutes(30), start.plusMinutes(60))
     Row(modifier = modifier.fillMaxWidth()) {
-        listOf("7:00pm", "7:30pm", "8:00pm").forEach {
+        slots.forEach {
             Text(
-                it,
+                it.format(TimeSlotFormatter).lowercase(),
                 color = TextPrimary,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -1387,10 +1606,28 @@ private fun EmptyPlaylistState(onAddPlaylist: () -> Unit) {
 @Composable
 private fun PlaylistCard(
     playlist: IptvPlaylist,
+    refreshState: PlaylistRefreshState,
     modifier: Modifier = Modifier,
     onRefresh: () -> Unit,
     onDelete: () -> Unit
 ) {
+    val isSyncing = refreshState is PlaylistRefreshState.Syncing &&
+        refreshState.playlistId == playlist.id
+    val statusMessage = when (refreshState) {
+        is PlaylistRefreshState.Success -> if (refreshState.playlistId == playlist.id) {
+            "Resync complete. Channels and EPG updated."
+        } else {
+            null
+        }
+        is PlaylistRefreshState.Error -> if (refreshState.playlistId == playlist.id) {
+            refreshState.message
+        } else {
+            null
+        }
+        else -> null
+    }
+    val statusColor = if (refreshState is PlaylistRefreshState.Error) Color(0xFFFFA3A3) else AccentAlt
+
     Card(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(8.dp),
@@ -1424,16 +1661,39 @@ private fun PlaylistCard(
                         letterSpacing = 0.sp
                     )
                 }
+                if (isSyncing) {
+                    Row(modifier = Modifier.padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(color = Accent, strokeWidth = 2.dp, modifier = Modifier.size(14.dp))
+                        Text(
+                            "Resyncing playlist and EPG...",
+                            color = TextSecondary,
+                            fontSize = 12.sp,
+                            letterSpacing = 0.sp,
+                            modifier = Modifier.padding(start = 8.dp)
+                        )
+                    }
+                }
+                statusMessage?.let { message ->
+                    Text(
+                        message,
+                        color = statusColor,
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp,
+                        letterSpacing = 0.sp,
+                        modifier = Modifier.padding(top = 10.dp)
+                    )
+                }
             }
             Column(horizontalAlignment = Alignment.End) {
                 OutlinedButton(
                     onClick = onRefresh,
+                    enabled = !isSyncing,
                     shape = RoundedCornerShape(6.dp),
                     border = BorderStroke(1.dp, Border),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary),
                     modifier = Modifier.height(34.dp)
                 ) {
-                    Text("Resync", fontSize = 11.sp, letterSpacing = 0.sp)
+                    Text(if (isSyncing) "Syncing" else "Resync", fontSize = 11.sp, letterSpacing = 0.sp)
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedButton(
@@ -1654,7 +1914,6 @@ private fun BottomNavItem(screen: AppScreen, selected: Boolean, onClick: () -> U
 private val AppScreen.testTag: String
     get() = when (this) {
         AppScreen.Live -> TestTags.LiveNav
-        AppScreen.Guide -> TestTags.GuideNav
         AppScreen.Search -> TestTags.SearchNav
         AppScreen.Playlists -> TestTags.PlaylistsNav
         AppScreen.Settings -> TestTags.SettingsNav
@@ -1662,10 +1921,13 @@ private val AppScreen.testTag: String
 
 private fun AppScreen.toGlyphKind(): GlyphKind = when (this) {
     AppScreen.Live -> GlyphKind.Screen
-    AppScreen.Guide -> GlyphKind.Calendar
     AppScreen.Search -> GlyphKind.Search
     AppScreen.Playlists -> GlyphKind.Playlist
     AppScreen.Settings -> GlyphKind.Settings
+}
+
+private fun String.toStableTag(): String {
+    return lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-').ifBlank { "group" }
 }
 
 private enum class GlyphKind {

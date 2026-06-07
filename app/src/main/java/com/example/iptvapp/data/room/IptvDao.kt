@@ -35,6 +35,9 @@ interface IptvDao {
     @Query("DELETE FROM epg_programs WHERE channelId IN (:channelIds)")
     suspend fun deleteProgramsForChannels(channelIds: List<String>)
 
+    @Query("DELETE FROM epg_programs WHERE channelId IN (SELECT id FROM channels WHERE playlistId = :playlistId)")
+    suspend fun deleteProgramsForPlaylist(playlistId: String)
+
     @Query("UPDATE channels SET favorite = :favorite WHERE id = :channelId")
     suspend fun setFavorite(channelId: String, favorite: Boolean)
 
@@ -47,9 +50,6 @@ interface IptvDao {
     @Query("DELETE FROM playlists WHERE id = :playlistId")
     suspend fun deletePlaylistRow(playlistId: String)
 
-    @Query("SELECT id FROM channels WHERE playlistId = :playlistId")
-    suspend fun getChannelIdsForPlaylist(playlistId: String): List<String>
-
     @Transaction
     suspend fun replaceChannelsForPlaylist(playlistId: String, channels: List<ChannelEntity>) {
         deleteChannelsForPlaylist(playlistId)
@@ -59,7 +59,9 @@ interface IptvDao {
     @Transaction
     suspend fun replaceProgramsForChannels(channelIds: List<String>, programs: List<EpgProgramEntity>) {
         if (channelIds.isNotEmpty()) {
-            deleteProgramsForChannels(channelIds)
+            channelIds.chunked(SQL_VARIABLE_BATCH_SIZE).forEach { ids ->
+                deleteProgramsForChannels(ids)
+            }
         }
         if (programs.isNotEmpty()) {
             upsertPrograms(programs)
@@ -68,9 +70,12 @@ interface IptvDao {
 
     @Transaction
     suspend fun deletePlaylist(playlistId: String) {
-        val channelIds = getChannelIdsForPlaylist(playlistId)
-        deleteProgramsForChannels(channelIds)
+        deleteProgramsForPlaylist(playlistId)
         deleteChannelsForPlaylist(playlistId)
         deletePlaylistRow(playlistId)
+    }
+
+    companion object {
+        private const val SQL_VARIABLE_BATCH_SIZE = 500
     }
 }

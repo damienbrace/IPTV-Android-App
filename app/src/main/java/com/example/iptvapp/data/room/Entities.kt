@@ -20,16 +20,20 @@ data class PlaylistEntity(
     indices = [
         Index("playlistId"),
         Index("category"),
-        Index("name")
+        Index("name"),
+        Index("epgChannelId")
     ]
 )
 data class ChannelEntity(
     @PrimaryKey val id: String,
     val playlistId: String,
     val streamId: Int?,
+    val streamKind: String = "live",
+    val containerExtension: String? = null,
     val number: Int,
     val name: String,
     val logoUrl: String?,
+    val epgChannelId: String? = null,
     val category: String,
     val streamUrl: String,
     val favorite: Boolean

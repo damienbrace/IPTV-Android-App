@@ -2,7 +2,10 @@ package com.example.iptvapp.ui
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.viewModelScope
 import com.example.iptvapp.data.model.IptvHomeState
 import com.example.iptvapp.data.repository.IptvRepository
@@ -29,10 +32,27 @@ sealed interface PlaylistSaveState {
     data class Error(val message: String) : PlaylistSaveState
 }
 
+sealed interface PlaylistRefreshState {
+    data object Idle : PlaylistRefreshState
+    data class Syncing(val playlistId: String) : PlaylistRefreshState
+    data class Success(val playlistId: String) : PlaylistRefreshState
+    data class Error(val playlistId: String, val message: String) : PlaylistRefreshState
+}
+
 class MainViewModel(
     application: Application,
     private val repository: IptvRepository = LocalIptvRepository(application)
 ) : AndroidViewModel(application) {
+    companion object {
+        val Factory: ViewModelProvider.Factory = viewModelFactory {
+            initializer {
+                val application = this[APPLICATION_KEY]
+                    ?: error("MainViewModel requires an Application")
+                MainViewModel(application)
+            }
+        }
+    }
+
     init {
         PlaylistSyncScheduler.schedule(application)
     }
@@ -54,6 +74,9 @@ class MainViewModel(
 
     private val _playlistSaveState = MutableStateFlow<PlaylistSaveState>(PlaylistSaveState.Idle)
     val playlistSaveState: StateFlow<PlaylistSaveState> = _playlistSaveState.asStateFlow()
+
+    private val _playlistRefreshState = MutableStateFlow<PlaylistRefreshState>(PlaylistRefreshState.Idle)
+    val playlistRefreshState: StateFlow<PlaylistRefreshState> = _playlistRefreshState.asStateFlow()
 
     fun addPlaylist(name: String, serverUrl: String, username: String, password: String) {
         viewModelScope.launch {
@@ -94,8 +117,19 @@ class MainViewModel(
 
     fun refreshPlaylist(playlistId: String) {
         viewModelScope.launch {
-            repository.refreshPlaylist(playlistId)
+            _playlistRefreshState.value = PlaylistRefreshState.Syncing(playlistId)
+            val result = repository.refreshPlaylist(playlistId)
+            _playlistRefreshState.value = result.fold(
+                onSuccess = { PlaylistRefreshState.Success(playlistId) },
+                onFailure = { error ->
+                    PlaylistRefreshState.Error(playlistId, error.message ?: "Unable to resync playlist")
+                }
+            )
         }
+    }
+
+    fun clearPlaylistRefreshState() {
+        _playlistRefreshState.value = PlaylistRefreshState.Idle
     }
 
     fun deletePlaylist(playlistId: String) {

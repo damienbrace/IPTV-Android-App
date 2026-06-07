@@ -14,10 +14,8 @@ class StreamHubSmokeTest {
 
     @Test
     fun bottomNavigationShowsPrimaryScreens() {
-        composeRule.onNodeWithText("StreamHub TV").assertIsDisplayed()
-
-        composeRule.onNodeWithTag(TestTags.GuideNav).performClick()
-        composeRule.onNodeWithText("TV Guide").assertIsDisplayed()
+        composeRule.onNodeWithText("Live TV").assertIsDisplayed()
+        composeRule.onNodeWithTag("${TestTags.GroupRowPrefix}all-channels").assertIsDisplayed()
 
         composeRule.onNodeWithTag(TestTags.SearchNav).performClick()
         composeRule.onNodeWithText("Search").assertIsDisplayed()
@@ -41,13 +39,14 @@ class StreamHubSmokeTest {
 
     @Test
     fun liveChannelOpensPlayerAndReturns() {
+        composeRule.onNodeWithTag("${TestTags.GroupRowPrefix}all-channels").performClick()
         composeRule.onNodeWithTag("${TestTags.ChannelRowPrefix}seven-news").performClick()
 
         composeRule.onNodeWithTag(TestTags.PlayerScreen).assertIsDisplayed()
         composeRule.onNodeWithText("LIVE").assertIsDisplayed()
 
         composeRule.onNodeWithTag(TestTags.PlayerBack).performClick()
-        composeRule.onNodeWithText("StreamHub TV").assertIsDisplayed()
+        composeRule.onNodeWithText("All Channels").assertIsDisplayed()
     }
 
     @Test

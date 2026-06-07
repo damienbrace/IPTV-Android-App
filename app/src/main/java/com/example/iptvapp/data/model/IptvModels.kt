@@ -20,6 +20,9 @@ data class GuideProgram(
     val channel: Channel,
     val primaryTitle: String,
     val secondaryTitle: String,
+    val primaryTime: String = "",
+    val secondaryTime: String = "",
+    val progress: Float = 0f,
     val startsAtHalfHour: Boolean = false
 )
 

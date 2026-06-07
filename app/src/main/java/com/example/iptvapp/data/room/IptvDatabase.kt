@@ -13,7 +13,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ChannelEntity::class,
         EpgProgramEntity::class
     ],
-    version = 2,
+    version = 4,
     exportSchema = false
 )
 abstract class IptvDatabase : RoomDatabase() {
@@ -30,7 +30,7 @@ abstract class IptvDatabase : RoomDatabase() {
                     IptvDatabase::class.java,
                     "streamhub.db"
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .build()
                     .also { instance = it }
             }
@@ -39,6 +39,20 @@ abstract class IptvDatabase : RoomDatabase() {
         private val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE channels ADD COLUMN streamId INTEGER")
+            }
+        }
+
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE channels ADD COLUMN streamKind TEXT NOT NULL DEFAULT 'live'")
+                db.execSQL("ALTER TABLE channels ADD COLUMN containerExtension TEXT")
+            }
+        }
+
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE channels ADD COLUMN epgChannelId TEXT")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_channels_epgChannelId ON channels(epgChannelId)")
             }
         }
     }
