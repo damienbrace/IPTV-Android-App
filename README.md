@@ -12,6 +12,14 @@ $env:Path="$env:JAVA_HOME\bin;$env:Path"
 .\gradlew.bat connectedDebugAndroidTest
 ```
 
+Or run the managed virtual device target after the Android SDK system image is installed:
+
+```powershell
+$env:JAVA_HOME='C:\Program Files\Android\Android Studio\jbr'
+$env:Path="$env:JAVA_HOME\bin;$env:Path"
+.\gradlew.bat pixel6Api35DebugAndroidTest
+```
+
 Manual checks:
 
 - App launches to Live TV without waiting on network.
