@@ -161,7 +161,9 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel()) {
                     if (playingChannel != null) {
                         PlayerScreen(
                             channel = playingChannel,
-                            onBack = { selectedChannel = null }
+                            channels = homeState.channels,
+                            onBack = { selectedChannel = null },
+                            onChannelSelected = { selectedChannel = it }
                         )
                     } else if (showAddPlaylist) {
                         AddPlaylistScreen(
@@ -624,25 +626,26 @@ private fun AddPlaylistScreen(
     }
 }
 
-@androidx.annotation.OptIn(UnstableApi::class)
 @Composable
-private fun PlayerScreen(channel: Channel, onBack: () -> Unit) {
+@androidx.annotation.OptIn(UnstableApi::class)
+private fun PlayerScreen(
+    channel: Channel,
+    channels: List<Channel>,
+    onBack: () -> Unit,
+    onChannelSelected: (Channel) -> Unit
+) {
     val context = LocalContext.current
     var playbackState by remember { mutableStateOf(Player.STATE_IDLE) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    val currentIndex = channels.indexOfFirst { it.id == channel.id }
+    val previousChannel = channels.getOrNull(currentIndex - 1)
+    val nextChannel = channels.getOrNull(currentIndex + 1)
 
-    val player = remember(channel.id) {
+    val player = remember {
         IptvPlayerFactory(context).createLivePlayer()
     }
 
-    DisposableEffect(channel.id, player) {
-        val playerFactory = IptvPlayerFactory(context)
-        val mediaItem = playerFactory.buildLiveMediaItem(
-            streamUrl = channel.streamUrl,
-            channelId = channel.id,
-            channelName = channel.name
-        )
-
+    DisposableEffect(player) {
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackStateValue: Int) {
                 playbackState = playbackStateValue
@@ -657,13 +660,24 @@ private fun PlayerScreen(channel: Channel, onBack: () -> Unit) {
         }
 
         player.addListener(listener)
-        player.setMediaItem(mediaItem)
-        player.prepare()
 
         onDispose {
             player.removeListener(listener)
             player.release()
         }
+    }
+
+    LaunchedEffect(channel.id) {
+        errorMessage = null
+        playbackState = Player.STATE_BUFFERING
+        val mediaItem = IptvPlayerFactory(context).buildLiveMediaItem(
+            streamUrl = channel.streamUrl,
+            channelId = channel.id,
+            channelName = channel.name
+        )
+        player.setMediaItem(mediaItem)
+        player.prepare()
+        player.play()
     }
 
     Box(
@@ -723,6 +737,37 @@ private fun PlayerScreen(channel: Channel, onBack: () -> Unit) {
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 0.sp
                 )
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(18.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color.Black.copy(alpha = 0.56f))
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            OutlinedButton(
+                onClick = { previousChannel?.let(onChannelSelected) },
+                enabled = previousChannel != null,
+                shape = RoundedCornerShape(6.dp),
+                border = BorderStroke(1.dp, Border),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary)
+            ) {
+                Text("Previous", fontSize = 12.sp, letterSpacing = 0.sp)
+            }
+            OutlinedButton(
+                onClick = { nextChannel?.let(onChannelSelected) },
+                enabled = nextChannel != null,
+                shape = RoundedCornerShape(6.dp),
+                border = BorderStroke(1.dp, Border),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary)
+            ) {
+                Text("Next", fontSize = 12.sp, letterSpacing = 0.sp)
             }
         }
 
