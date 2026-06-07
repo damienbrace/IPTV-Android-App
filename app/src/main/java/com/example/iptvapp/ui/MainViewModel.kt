@@ -1,10 +1,12 @@
 package com.example.iptvapp.ui
 
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.iptvapp.data.model.IptvHomeState
-import com.example.iptvapp.data.repository.FakeIptvRepository
 import com.example.iptvapp.data.repository.IptvRepository
+import com.example.iptvapp.data.repository.LocalIptvRepository
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,8 +29,9 @@ sealed interface PlaylistSaveState {
 }
 
 class MainViewModel(
-    private val repository: IptvRepository = FakeIptvRepository()
-) : ViewModel() {
+    application: Application,
+    private val repository: IptvRepository = LocalIptvRepository(application)
+) : AndroidViewModel(application) {
     val homeState: StateFlow<IptvHomeState> = repository.homeState.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
