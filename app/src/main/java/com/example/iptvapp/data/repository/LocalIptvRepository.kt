@@ -5,8 +5,10 @@ import android.util.Log
 import androidx.compose.ui.graphics.Color
 import com.example.iptvapp.data.model.Channel
 import com.example.iptvapp.data.model.GuideProgram
+import com.example.iptvapp.data.model.GuideProgramBlock
 import com.example.iptvapp.data.model.IptvHomeState
 import com.example.iptvapp.data.model.IptvPlaylist
+import com.example.iptvapp.data.model.isLikelyLiveSportsEvent
 import com.example.iptvapp.data.remote.XcodesApiClient
 import com.example.iptvapp.data.remote.XcodesLiveStream
 import com.example.iptvapp.data.room.ChannelEntity
@@ -15,14 +17,24 @@ import com.example.iptvapp.data.room.IptvDatabase
 import com.example.iptvapp.data.room.PlaylistEntity
 import com.example.iptvapp.data.security.CredentialVault
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class LocalIptvRepository(
     context: Context,
     private val xcodesApiClient: XcodesApiClient = XcodesApiClient(),
@@ -30,11 +42,16 @@ class LocalIptvRepository(
 ) : IptvRepository {
     private val dao = IptvDatabase.getInstance(context).iptvDao()
     private val sampleChannels = SampleIptvData.channels
+    private val activeGuideChannelIds = MutableStateFlow<List<String>>(emptyList())
+    private val activeGuidePrograms = activeGuideChannelIds
+        .flatMapLatest { channelIds ->
+            if (channelIds.isEmpty()) flowOf(emptyList<EpgProgramEntity>()) else dao.observePrograms(channelIds)
+        }
 
     override val homeState: Flow<IptvHomeState> = combine(
         dao.observePlaylists(),
         dao.observeChannels(),
-        dao.observePrograms()
+        activeGuidePrograms
     ) { playlistEntities, channelEntities, programEntities ->
         val playlistsById = playlistEntities.associateBy { it.id }
         val playlistPasswordsById = playlistEntities.mapNotNull { playlist ->
@@ -50,10 +67,10 @@ class LocalIptvRepository(
         val channelsById = channels.associateBy { it.id }
         IptvHomeState(
             channels = channels,
-            guidePrograms = if (channelEntities.isEmpty() || programEntities.isEmpty()) {
-                channels.toGuidePrograms()
+            guidePrograms = if (programEntities.isEmpty()) {
+                emptyList()
             } else {
-                programEntities.toGuidePrograms(channels, channelsById)
+                programEntities.toGuidePrograms(channelsById)
             },
             playlists = playlistEntities.map { it.toPlaylist() },
             recentSearches = listOf("Seven", "ESPN", "Discovery", "News", "Sports"),
@@ -96,12 +113,6 @@ class LocalIptvRepository(
                 )
             )
             dao.replaceChannelsForPlaylist(playlist.id, channelEntities)
-            syncShortEpg(
-                channelEntities = channelEntities,
-                serverUrl = serverUrl,
-                username = username,
-                password = password
-            )
             playlist
         }
     }
@@ -119,6 +130,90 @@ class LocalIptvRepository(
             val playlist = dao.getPlaylist(playlistId) ?: error("Playlist not found")
             val password = credentialVault.decrypt(playlist.encryptedPassword)
             refreshPlaylist(playlist, password)
+        }
+    }
+
+    override suspend fun refreshGuide(channelIds: List<String>): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val requestedIds = channelIds.distinct().take(MAX_ON_DEMAND_EPG_CHANNELS)
+            if (requestedIds.isEmpty()) return@runCatching
+            activeGuideChannelIds.value = requestedIds
+
+            val channels = requestedIds
+                .chunked(SQL_QUERY_BATCH_SIZE)
+                .flatMap { ids -> dao.getChannels(ids) }
+                .filter { it.streamKind == STREAM_KIND_LIVE && it.streamId != null }
+            val existingPrograms = requestedIds
+                .chunked(SQL_QUERY_BATCH_SIZE)
+                .flatMap { ids -> dao.getPrograms(ids) }
+                .groupBy { it.channelId }
+            val now = System.currentTimeMillis()
+            val channelsNeedingGuide = channels.filter { channel ->
+                val channelPrograms = existingPrograms[channel.id]
+                    .orEmpty()
+                val latestGuideEnd = channelPrograms.maxOfOrNull { it.endsAtEpochMillis } ?: 0L
+                latestGuideEnd < now + MIN_GUIDE_COVERAGE_MILLIS
+            }
+            if (channelsNeedingGuide.isEmpty()) return@runCatching
+
+            val playlists = channelsNeedingGuide
+                .map { it.playlistId }
+                .distinct()
+                .mapNotNull { playlistId -> dao.getPlaylist(playlistId) }
+                .associateBy { it.id }
+            val passwords = playlists.mapNotNull { (playlistId, playlist) ->
+                runCatching { playlistId to credentialVault.decrypt(playlist.encryptedPassword) }.getOrNull()
+            }.toMap()
+            val semaphore = Semaphore(ON_DEMAND_EPG_CONCURRENCY)
+            val refreshedPrograms = coroutineScope {
+                channelsNeedingGuide.mapNotNull { channel ->
+                    val playlist = playlists[channel.playlistId] ?: return@mapNotNull null
+                    val password = passwords[channel.playlistId] ?: return@mapNotNull null
+                    val streamId = channel.streamId ?: return@mapNotNull null
+                    async {
+                        semaphore.withPermit {
+                            val result = xcodesApiClient.fetchShortEpg(
+                                serverUrl = playlist.serverUrl,
+                                username = playlist.username,
+                                password = password,
+                                streamId = streamId,
+                                limit = ON_DEMAND_EPG_PROGRAM_LIMIT
+                            )
+                            result.exceptionOrNull()?.let { error ->
+                                Log.w(TAG, "On-demand EPG failed for channel ${channel.id}", error)
+                            }
+                            val programs = result.getOrElse { emptyList() }
+                                .filter { program ->
+                                    program.endsAtEpochMillis > now &&
+                                        program.startsAtEpochMillis <= now + EPG_FUTURE_WINDOW_MILLIS
+                                }
+                                .sortedBy { it.startsAtEpochMillis }
+                            channel to programs
+                        }
+                    }
+                }.awaitAll()
+            }
+            val successful = refreshedPrograms.filter { (_, programs) -> programs.isNotEmpty() }
+            if (successful.isNotEmpty()) {
+                val entities = successful.flatMap { (channel, programs) ->
+                    programs.mapIndexed { index, program ->
+                        EpgProgramEntity(
+                            id = "${channel.id}-${program.startsAtEpochMillis}-ondemand-$index",
+                            channelId = channel.id,
+                            title = program.title,
+                            description = program.description,
+                            startsAtEpochMillis = program.startsAtEpochMillis,
+                            endsAtEpochMillis = program.endsAtEpochMillis
+                        )
+                    }
+                }
+                dao.replaceProgramsForChannels(successful.map { it.first.id }, entities)
+            }
+            Log.i(
+                TAG,
+                "On-demand EPG: requested=${requestedIds.size}, stale=${channelsNeedingGuide.size}, " +
+                    "updated=${successful.size}, rows=${successful.sumOf { it.second.size }}"
+            )
         }
     }
 
@@ -161,12 +256,6 @@ class LocalIptvRepository(
             )
         )
         dao.replaceChannelsForPlaylist(playlist.id, channelEntities)
-        syncShortEpg(
-            channelEntities = channelEntities,
-            serverUrl = playlist.serverUrl,
-            username = playlist.username,
-            password = password
-        )
     }
 
     private suspend fun fetchChannelEntities(
@@ -348,7 +437,7 @@ class LocalIptvRepository(
                     )
                 }
         }
-        val syncedChannelIds = (xmltvChannels.map { it.id } + shortEpgChannels.map { it.id }).distinct()
+        val syncedChannelIds = (channelsWithXmltv + shortEpgEntities.map { it.channelId }).distinct()
         Log.i(
             TAG,
             "EPG sync result: live=${liveChannels.size}, epgIds=${xmltvChannels.count { !it.epgChannelId.isNullOrBlank() }}, " +
@@ -359,25 +448,33 @@ class LocalIptvRepository(
     }
 
     private fun List<EpgProgramEntity>.toGuidePrograms(
-        channels: List<Channel>,
         channelsById: Map<String, Channel>
     ): List<GuideProgram> {
         val now = System.currentTimeMillis()
         val programsByChannel = groupBy { it.channelId }
-        return channels.map { channel ->
-            val programs = programsByChannel[channel.id]
-                .orEmpty()
+        return programsByChannel.mapNotNull { (channelId, channelPrograms) ->
+            val channel = channelsById[channelId] ?: return@mapNotNull null
+            val programs = channelPrograms
                 .filter { it.title.isUsableGuideTitle() }
                 .sortedBy { it.startsAtEpochMillis }
+                .withoutOverlappingDuplicates()
             val currentProgram = programs.firstOrNull {
                 it.startsAtEpochMillis <= now && it.endsAtEpochMillis > now
             }
             val primaryProgram = currentProgram
                 ?: programs.firstOrNull { it.startsAtEpochMillis > now }
-                ?: programs.lastOrNull { it.endsAtEpochMillis <= now }
             val nextProgram = programs.firstOrNull {
                 primaryProgram != null && it.startsAtEpochMillis > primaryProgram.startsAtEpochMillis
             }
+            val timelinePrograms = (
+                listOfNotNull(primaryProgram) +
+                    programs.filter { program ->
+                        primaryProgram == null ||
+                            program.startsAtEpochMillis > primaryProgram.startsAtEpochMillis
+                    }
+                )
+                .distinctBy { "${it.startsAtEpochMillis}-${it.endsAtEpochMillis}-${it.title}" }
+                .take(GUIDE_TIMELINE_PROGRAM_LIMIT)
             GuideProgram(
                 channel = channel,
                 primaryTitle = primaryProgram?.title ?: "",
@@ -385,18 +482,24 @@ class LocalIptvRepository(
                 primaryTime = primaryProgram?.timeRange().orEmpty(),
                 secondaryTime = nextProgram?.timeRange().orEmpty(),
                 progress = currentProgram?.progressAt(now) ?: 0f,
-                startsAtHalfHour = primaryProgram?.startsAtHalfHour() ?: false
-            )
-        }.filter { channelsById.containsKey(it.channel.id) }
-    }
-
-    private fun List<Channel>.toGuidePrograms(): List<GuideProgram> {
-        return map { channel ->
-            GuideProgram(
-                channel = channel,
-                primaryTitle = "",
-                secondaryTitle = "",
-                startsAtHalfHour = false
+                startsAtHalfHour = primaryProgram?.startsAtHalfHour() ?: false,
+                timeline = timelinePrograms.map { program ->
+                    val isCurrent = program == currentProgram
+                    GuideProgramBlock(
+                        title = program.title,
+                        time = program.timeRange(),
+                        startsAtEpochMillis = program.startsAtEpochMillis,
+                        endsAtEpochMillis = program.endsAtEpochMillis,
+                        progress = if (isCurrent) program.progressAt(now) else 0f,
+                        isCurrent = isCurrent,
+                        isLiveEvent = isCurrent && isLikelyLiveSportsEvent(
+                            title = program.title,
+                            description = program.description,
+                            channelName = channel.name,
+                            channelCategory = channel.category
+                        )
+                    )
+                }
             )
         }
     }
@@ -441,6 +544,55 @@ class LocalIptvRepository(
             .trim()
     }
 
+    private fun List<EpgProgramEntity>.withoutOverlappingDuplicates(): List<EpgProgramEntity> {
+        val accepted = mutableListOf<EpgProgramEntity>()
+        val acceptedIndexesByTitle = mutableMapOf<String, MutableList<Int>>()
+        forEach { program ->
+            val titleKey = program.title.normalizedProgramTitle()
+            val matchingIndexes = acceptedIndexesByTitle[titleKey].orEmpty()
+            val duplicateIndex = matchingIndexes.asReversed().firstOrNull { index ->
+                accepted[index].substantiallyOverlaps(program)
+            } ?: -1
+            if (duplicateIndex >= 0) {
+                val existing = accepted[duplicateIndex]
+                if (program.startsAtEpochMillis >= existing.startsAtEpochMillis) {
+                    accepted[duplicateIndex] = program
+                }
+            } else {
+                accepted += program
+                acceptedIndexesByTitle.getOrPut(titleKey) { mutableListOf() } += accepted.lastIndex
+            }
+        }
+        return accepted.sortedBy { it.startsAtEpochMillis }
+    }
+
+    private fun EpgProgramEntity.substantiallyOverlaps(other: EpgProgramEntity): Boolean {
+        val overlap = (
+            minOf(endsAtEpochMillis, other.endsAtEpochMillis) -
+                maxOf(startsAtEpochMillis, other.startsAtEpochMillis)
+            ).coerceAtLeast(0L)
+        val shorterDuration = minOf(
+            endsAtEpochMillis - startsAtEpochMillis,
+            other.endsAtEpochMillis - other.startsAtEpochMillis
+        ).coerceAtLeast(1L)
+        return overlap.toDouble() / shorterDuration.toDouble() >= DUPLICATE_PROGRAM_OVERLAP_RATIO
+    }
+
+    private fun String.normalizedProgramTitle(): String {
+        return buildString(length) {
+            var lastWasSpace = true
+            this@normalizedProgramTitle.forEach { character ->
+                if (character.isLetterOrDigit()) {
+                    append(character.lowercaseChar())
+                    lastWasSpace = false
+                } else if (!lastWasSpace) {
+                    append(' ')
+                    lastWasSpace = true
+                }
+            }
+        }.trimEnd()
+    }
+
     private fun EpgProgramEntity.timeRange(): String {
         return "${startsAtEpochMillis.formatTime()} - ${endsAtEpochMillis.formatTime()}"
     }
@@ -467,8 +619,15 @@ class LocalIptvRepository(
         const val STREAM_KIND_LIVE = "live"
         const val STREAM_KIND_MOVIE = "movie"
         const val MAX_EPG_SYNC_CHANNELS = 420
+        const val MAX_ON_DEMAND_EPG_CHANNELS = 120
+        const val ON_DEMAND_EPG_PROGRAM_LIMIT = 384
+        const val ON_DEMAND_EPG_CONCURRENCY = 6
+        const val SQL_QUERY_BATCH_SIZE = 500
         const val EPG_PAST_WINDOW_MILLIS = 24L * 60L * 60L * 1_000L
-        const val EPG_FUTURE_WINDOW_MILLIS = 24L * 60L * 60L * 1_000L
+        const val EPG_FUTURE_WINDOW_MILLIS = 7L * 24L * 60L * 60L * 1_000L
+        const val MIN_GUIDE_COVERAGE_MILLIS = 6L * 24L * 60L * 60L * 1_000L
+        const val GUIDE_TIMELINE_PROGRAM_LIMIT = 384
+        const val DUPLICATE_PROGRAM_OVERLAP_RATIO = 0.8
         const val MIN_FUZZY_GUIDE_KEY_LENGTH = 8
         const val TAG = "StreamHubEpg"
         val TimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("h:mm a")

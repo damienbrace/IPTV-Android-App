@@ -1,6 +1,13 @@
 package com.example.iptvapp
 
+import android.app.Activity
+import android.app.PictureInPictureParams
+import android.content.res.Configuration
 import android.os.Bundle
+import android.util.Log
+import android.util.Rational
+import android.view.WindowManager
+import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -9,6 +16,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +30,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -30,6 +39,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -37,6 +47,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalTextStyle
@@ -74,19 +86,26 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.PlayerView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.example.iptvapp.core.playback.PlaybackDiagnosticsStore
 import com.example.iptvapp.core.playback.IptvPlayerFactory
+import com.example.iptvapp.core.playback.LiveStreamFormat
 import com.example.iptvapp.core.playback.PlaybackTelemetryRecorder
 import com.example.iptvapp.core.playback.PlaybackTelemetrySnapshot
+import com.example.iptvapp.core.playback.supportsLiveStreamFormatSwitch
 import com.example.iptvapp.data.model.Channel
 import com.example.iptvapp.data.model.GuideProgram
 import com.example.iptvapp.data.model.IptvPlaylist
@@ -98,6 +117,7 @@ import com.example.iptvapp.ui.theme.IPTVAppTheme
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.delay
 import java.time.LocalDateTime
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 
@@ -119,6 +139,14 @@ private val TextSecondary = Color(0xFFB8C1D4)
 private val TextMuted = Color(0xFF7D879A)
 private val Success = Color(0xFF36D37E)
 private val TimeSlotFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("h:mm a")
+private val DaySlotFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("EEE d")
+private const val TimelineDays = 7
+private const val TimelineSlotsPerDay = 48
+private const val TimelineCellCount = TimelineSlotsPerDay
+private const val TimelineSlotMillis = 30L * 60L * 1_000L
+private const val TimelineDurationMillis = 24L * 60L * 60L * 1_000L
+private val TimelineSlotWidth = 180.dp
+private val TimelineProgramGap = 4.dp
 
 object TestTags {
     const val LiveNav = "nav_live"
@@ -134,6 +162,9 @@ object TestTags {
 }
 
 class MainActivity : ComponentActivity() {
+    var isPipMode by mutableStateOf(false)
+        private set
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -142,6 +173,24 @@ class MainActivity : ComponentActivity() {
                 StreamHubApp()
             }
         }
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        isPipMode = isInPictureInPictureMode
+    }
+
+    fun setPipPlaybackEnabled(enabled: Boolean) {
+        setPictureInPictureParams(
+            PictureInPictureParams.Builder()
+                .setAspectRatio(Rational(16, 9))
+                .setAutoEnterEnabled(enabled)
+                .setSeamlessResizeEnabled(true)
+                .build()
+        )
     }
 }
 
@@ -153,8 +202,36 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel(factory = MainView
     val playlistRefreshState by viewModel.playlistRefreshState.collectAsState()
     val diagnostics by PlaybackDiagnosticsStore.recentSnapshots.collectAsState()
     var currentScreen by remember { mutableStateOf(AppScreen.Live) }
+    var screenHistory by remember { mutableStateOf(emptyList<AppScreen>()) }
+    var selectedLiveGroup by remember { mutableStateOf<String?>(null) }
     var showAddPlaylist by remember { mutableStateOf(false) }
     var selectedChannel by remember { mutableStateOf<Channel?>(null) }
+
+    fun navigateToScreen(screen: AppScreen) {
+        if (screen != currentScreen) {
+            screenHistory = screenHistory + currentScreen
+            currentScreen = screen
+        }
+    }
+
+    fun closeAddPlaylist() {
+        viewModel.clearConnectionTest()
+        viewModel.clearPlaylistSaveState()
+        showAddPlaylist = false
+    }
+
+    BackHandler(enabled = selectedChannel == null) {
+        when {
+            showAddPlaylist -> closeAddPlaylist()
+            currentScreen == AppScreen.Live && selectedLiveGroup != null -> selectedLiveGroup = null
+            screenHistory.isNotEmpty() -> {
+                currentScreen = screenHistory.last()
+                screenHistory = screenHistory.dropLast(1)
+            }
+            currentScreen != AppScreen.Live -> currentScreen = AppScreen.Live
+            else -> Unit
+        }
+    }
 
     Surface(color = AppBackground, modifier = Modifier.fillMaxSize()) {
         Box(
@@ -173,7 +250,7 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel(factory = MainView
                     if (!showAddPlaylist && selectedChannel == null) {
                         BottomNavigationBar(
                             selected = currentScreen,
-                            onSelected = { currentScreen = it }
+                            onSelected = ::navigateToScreen
                         )
                     }
                 }
@@ -195,11 +272,7 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel(factory = MainView
                         AddPlaylistScreen(
                             connectionTestState = connectionTestState,
                             playlistSaveState = playlistSaveState,
-                            onBack = {
-                                viewModel.clearConnectionTest()
-                                viewModel.clearPlaylistSaveState()
-                                showAddPlaylist = false
-                            },
+                            onBack = ::closeAddPlaylist,
                             onTestConnection = viewModel::testPlaylistConnection,
                             onSavePlaylist = { name, serverUrl, username, password ->
                                 viewModel.addPlaylist(name, serverUrl, username, password)
@@ -215,6 +288,9 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel(factory = MainView
                                 channels = homeState.channels,
                                 guidePrograms = homeState.guidePrograms,
                                 categories = homeState.categories,
+                                selectedGroup = selectedLiveGroup,
+                                onSelectedGroupChange = { selectedLiveGroup = it },
+                                onRefreshGuide = viewModel::refreshGuide,
                                 onToggleFavorite = viewModel::toggleFavorite,
                                 onPlayChannel = { selectedChannel = it }
                             )
@@ -265,43 +341,77 @@ private fun LiveScreen(
     channels: List<Channel>,
     guidePrograms: List<GuideProgram>,
     categories: List<String>,
+    selectedGroup: String?,
+    onSelectedGroupChange: (String?) -> Unit,
+    onRefreshGuide: (List<String>) -> Unit,
     onToggleFavorite: (String) -> Unit,
     onPlayChannel: (Channel) -> Unit
 ) {
     val groups = categories.ifEmpty { listOf("All Channels") }
-    var selectedGroup by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(groups) {
         if (selectedGroup != null && selectedGroup !in groups) {
-            selectedGroup = null
+            onSelectedGroupChange(null)
         }
     }
-    val guideProgramsByChannelId = guidePrograms.associateBy { it.channel.id }
-    val visibleChannels = channels.filter { channel ->
-        selectedGroup == "All Channels" ||
-            selectedGroup == channel.category ||
-            (selectedGroup == "Favourites" && channel.favorite)
+    val guideProgramsByChannelId = remember(guidePrograms) {
+        guidePrograms.associateBy { it.channel.id }
     }
-    val titleText = selectedGroup ?: "Live TV"
+    val channelCountsByGroup = remember(channels) {
+        channels.groupingBy { it.category }.eachCount()
+    }
+    val favouriteCount = remember(channels) { channels.count { it.favorite } }
+    val visibleChannels = remember(channels, selectedGroup) {
+        when (selectedGroup) {
+            null -> emptyList()
+            "All Channels" -> channels
+            "Favourites" -> channels.filter { it.favorite }
+            else -> channels.filter { it.category == selectedGroup }
+        }
+    }
+    LaunchedEffect(selectedGroup) {
+        if (selectedGroup != null) {
+            onRefreshGuide(visibleChannels.map { it.id })
+        }
+    }
+    val titleText = selectedGroup?.toGuideTitle() ?: "Live TV"
 
     Column(modifier = Modifier.fillMaxSize()) {
         AppHeader(
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (selectedGroup != null) {
-                        GlyphButton(kind = GlyphKind.Back, onClick = { selectedGroup = null })
+                        GlyphButton(kind = GlyphKind.Back, onClick = { onSelectedGroupChange(null) })
                         Spacer(modifier = Modifier.width(12.dp))
                     }
-                    Text(
-                        titleText,
-                        color = TextPrimary,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 22.sp,
-                        letterSpacing = 0.sp
-                    )
+                    Column {
+                        Text(
+                            titleText,
+                            color = TextPrimary,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 22.sp,
+                            letterSpacing = 0.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (selectedGroup != null) {
+                            Text(
+                                "${visibleChannels.size} channels",
+                                color = TextSecondary,
+                                fontSize = 13.sp,
+                                letterSpacing = 0.sp,
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
+                        }
+                    }
                 }
             },
             actions = {
-                GlyphButton(kind = GlyphKind.Bell, onClick = {})
+                if (selectedGroup == null) {
+                    GlyphButton(kind = GlyphKind.Bell, onClick = {})
+                } else {
+                    GlyphButton(kind = GlyphKind.Search, onClick = {})
+                    GlyphButton(kind = GlyphKind.More, onClick = {})
+                }
             }
         )
 
@@ -319,35 +429,482 @@ private fun LiveScreen(
                 items(groups, key = { it }) { group ->
                     LiveGroupRow(
                         group = group,
-                        channelCount = channels.count { channel ->
-                            group == "All Channels" ||
-                                group == channel.category ||
-                                (group == "Favourites" && channel.favorite)
+                        channelCount = when (group) {
+                            "All Channels" -> channels.size
+                            "Favourites" -> favouriteCount
+                            else -> channelCountsByGroup[group] ?: 0
                         },
-                        onClick = { selectedGroup = group }
+                        onClick = { onSelectedGroupChange(group) }
                     )
                 }
             }
         } else {
-            TimeStrip(modifier = Modifier.padding(start = 132.dp, end = 18.dp, bottom = 6.dp))
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                    start = 18.dp,
-                    end = 18.dp,
-                    bottom = 14.dp
-                ),
-                verticalArrangement = Arrangement.spacedBy(1.dp)
+            LiveTimelineGuide(
+                channels = visibleChannels,
+                programsByChannelId = guideProgramsByChannelId,
+                onToggleFavorite = onToggleFavorite,
+                onPlayChannel = onPlayChannel
+            )
+        }
+    }
+}
+
+@Composable
+private fun LiveTimelineGuide(
+    channels: List<Channel>,
+    programsByChannelId: Map<String, GuideProgram>,
+    onToggleFavorite: (String) -> Unit,
+    onPlayChannel: (Channel) -> Unit
+) {
+    var now by remember { mutableStateOf(LocalDateTime.now()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            now = LocalDateTime.now()
+            delay(60_000)
+        }
+    }
+    val timelineScroll = rememberScrollState()
+    var selectedDayOffset by remember { mutableStateOf(0) }
+    val today = now.toLocalDate()
+    val selectedDate = today.plusDays(selectedDayOffset.toLong())
+    val slotStart = if (selectedDayOffset == 0) {
+        now.truncatedTo(ChronoUnit.HOURS).plusMinutes((now.minute / 30L) * 30L)
+    } else {
+        selectedDate.atStartOfDay()
+    }
+    val slotStartEpochMillis = slotStart.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+    val slotLabels = List(TimelineCellCount) { index -> slotStart.plusMinutes(index * 30L) }
+    val secondsIntoSlot = ChronoUnit.SECONDS.between(slotStart, now).coerceIn(0L, 30L * 60L)
+    val currentTimeOffset = if (selectedDayOffset == 0) {
+        TimelineSlotWidth * (secondsIntoSlot / (30f * 60f))
+    } else {
+        null
+    }
+    LaunchedEffect(selectedDayOffset) {
+        timelineScroll.scrollTo(0)
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        GuideTimelineHeader(
+            slots = slotLabels,
+            now = now,
+            selectedDayOffset = selectedDayOffset,
+            onDaySelected = { selectedDayOffset = it },
+            currentTimeOffset = currentTimeOffset,
+            scrollState = timelineScroll,
+            modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 8.dp)
+        )
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                start = 14.dp,
+                end = 14.dp,
+                bottom = 14.dp
+            ),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            items(channels, key = { it.id }) { channel ->
+                GuideTimelineRow(
+                    channel = channel,
+                    program = programsByChannelId[channel.id],
+                    timelineStartEpochMillis = slotStartEpochMillis,
+                    currentTimeOffset = currentTimeOffset,
+                    scrollState = timelineScroll,
+                    onFavoriteClick = { onToggleFavorite(channel.id) },
+                    onPlayClick = { onPlayChannel(channel) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun GuideTimelineHeader(
+    slots: List<LocalDateTime>,
+    now: LocalDateTime,
+    selectedDayOffset: Int,
+    onDaySelected: (Int) -> Unit,
+    currentTimeOffset: Dp?,
+    scrollState: androidx.compose.foundation.ScrollState,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        var dayMenuExpanded by remember { mutableStateOf(false) }
+        Box(modifier = Modifier.width(88.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(36.dp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .clickable { dayMenuExpanded = true }
+                    .background(Panel.copy(alpha = 0.92f))
+                    .border(1.dp, Border.copy(alpha = 0.6f), RoundedCornerShape(7.dp))
+                    .padding(horizontal = 7.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                items(visibleChannels, key = { it.id }) { channel ->
-                    LiveGuideChannelRow(
-                        channel = channel,
-                        program = guideProgramsByChannelId[channel.id],
-                        onFavoriteClick = { onToggleFavorite(channel.id) },
-                        onPlayClick = { onPlayChannel(channel) }
+                SmallGlyph(kind = GlyphKind.Calendar, tint = TextSecondary, modifier = Modifier.size(15.dp))
+                Text(
+                    dayLabel(now, selectedDayOffset),
+                    color = TextPrimary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = 5.dp)
+                )
+            }
+            DropdownMenu(
+                expanded = dayMenuExpanded,
+                onDismissRequest = { dayMenuExpanded = false }
+            ) {
+                repeat(TimelineDays) { dayOffset ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                dayLabel(now, dayOffset),
+                                color = TextPrimary,
+                                letterSpacing = 0.sp
+                            )
+                        },
+                        onClick = {
+                            onDaySelected(dayOffset)
+                            dayMenuExpanded = false
+                        }
                     )
                 }
             }
+        }
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 6.dp)
+                .height(42.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .horizontalScroll(scrollState)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(timelineContentWidth(slots.size))
+                        .fillMaxHeight()
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        slots.forEach { slot ->
+                            Text(
+                                if (slot.hour == 0 && slot.minute == 0) {
+                                    slot.format(DaySlotFormatter)
+                                } else {
+                                    slot.format(TimeSlotFormatter).lowercase()
+                                },
+                                color = TextSecondary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                letterSpacing = 0.sp,
+                                maxLines = 1,
+                                modifier = Modifier.width(TimelineSlotWidth)
+                            )
+                        }
+                    }
+                    if (currentTimeOffset != null) {
+                        Box(
+                            modifier = Modifier
+                                .padding(start = currentTimeOffset)
+                                .clip(RoundedCornerShape(7.dp))
+                                .background(Accent)
+                                .padding(horizontal = 9.dp, vertical = 7.dp)
+                                .align(Alignment.CenterStart),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                now.format(TimeSlotFormatter).lowercase(),
+                                color = TextPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                letterSpacing = 0.sp,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun GuideTimelineRow(
+    channel: Channel,
+    program: GuideProgram?,
+    timelineStartEpochMillis: Long,
+    currentTimeOffset: Dp?,
+    scrollState: androidx.compose.foundation.ScrollState,
+    onFavoriteClick: () -> Unit,
+    onPlayClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("${TestTags.ChannelRowPrefix}${channel.id}")
+            .height(108.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        GuideChannelCard(
+            channel = channel,
+            onFavoriteClick = onFavoriteClick,
+            modifier = Modifier
+                .width(88.dp)
+                .fillMaxHeight()
+        )
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight()
+                .padding(start = 6.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .horizontalScroll(scrollState)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(timelineContentWidth(TimelineCellCount))
+                        .fillMaxHeight()
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val slotWidthPx = TimelineSlotWidth.toPx()
+                        val lineColor = Border.copy(alpha = 0.22f)
+                        repeat(TimelineCellCount + 1) { index ->
+                            val x = index * slotWidthPx
+                            drawLine(
+                                color = lineColor,
+                                start = Offset(x, 0f),
+                                end = Offset(x, size.height),
+                                strokeWidth = 1.dp.toPx()
+                            )
+                        }
+                    }
+                    val timelineEndEpochMillis = timelineStartEpochMillis + TimelineDurationMillis
+                    val timelineBlocks = program?.timeline.orEmpty()
+                        .filter { block ->
+                            block.endsAtEpochMillis > timelineStartEpochMillis &&
+                                block.startsAtEpochMillis < timelineEndEpochMillis
+                        }
+                    if (timelineBlocks.isEmpty()) {
+                        GuideProgramCell(
+                            title = "",
+                            time = "",
+                            isCurrent = false,
+                            showLiveBadge = false,
+                            progress = 0f,
+                            showPlaceholder = true,
+                            onClick = onPlayClick,
+                            modifier = Modifier.width(TimelineSlotWidth - TimelineProgramGap)
+                        )
+                    } else {
+                        timelineBlocks.forEach { block ->
+                            val visibleStart = maxOf(block.startsAtEpochMillis, timelineStartEpochMillis)
+                            val visibleEnd = minOf(block.endsAtEpochMillis, timelineEndEpochMillis)
+                            val startSlots = (visibleStart - timelineStartEpochMillis).toFloat() / TimelineSlotMillis
+                            val durationSlots = (visibleEnd - visibleStart).toFloat() / TimelineSlotMillis
+                            val startOffset = TimelineSlotWidth * startSlots
+                            val programWidth = (TimelineSlotWidth * durationSlots - TimelineProgramGap)
+                                .coerceAtLeast(52.dp)
+                            GuideProgramCell(
+                                title = block.title,
+                                time = block.time,
+                                isCurrent = block.isCurrent,
+                                showLiveBadge = block.isLiveEvent,
+                                progress = block.progress,
+                                showPlaceholder = false,
+                                onClick = onPlayClick,
+                                modifier = Modifier
+                                    .offset(x = startOffset)
+                                    .width(programWidth)
+                            )
+                        }
+                    }
+                    if (currentTimeOffset != null) {
+                        Box(
+                            modifier = Modifier
+                                .padding(start = currentTimeOffset)
+                                .fillMaxHeight()
+                                .width(2.dp)
+                                .background(Accent)
+                                .align(Alignment.CenterStart)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun timelineContentWidth(cellCount: Int): Dp {
+    return TimelineSlotWidth * cellCount
+}
+
+private fun dayLabel(now: LocalDateTime, dayOffset: Int): String {
+    return when (dayOffset) {
+        0 -> "Today"
+        1 -> "Tomorrow"
+        else -> now.toLocalDate().plusDays(dayOffset.toLong()).format(DaySlotFormatter)
+    }
+}
+
+@Composable
+private fun GuideChannelCard(
+    channel: Channel,
+    onFavoriteClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(Panel.copy(alpha = 0.92f))
+            .border(1.dp, Border.copy(alpha = 0.28f), RoundedCornerShape(6.dp))
+    ) {
+        Box(modifier = Modifier.align(Alignment.Center)) {
+            LogoBadge(channel = channel)
+        }
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(24.dp)
+                .padding(start = 6.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                channel.number.toString(),
+                color = TextSecondary,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Medium,
+                letterSpacing = 0.sp,
+                maxLines = 1
+            )
+            Box(
+                modifier = Modifier
+                    .size(24.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onFavoriteClick),
+                contentAlignment = Alignment.Center
+            ) {
+                SmallGlyph(
+                    kind = GlyphKind.Star,
+                    tint = if (channel.favorite) Accent else TextSecondary,
+                    modifier = Modifier.size(11.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun GuideProgramCell(
+    title: String,
+    time: String,
+    isCurrent: Boolean,
+    showLiveBadge: Boolean,
+    progress: Float,
+    showPlaceholder: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val hasProgram = title.isNotBlank()
+    Box(
+        modifier = modifier
+            .fillMaxHeight()
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(onClick = onClick)
+            .background(
+                if (hasProgram) {
+                    PanelSoft
+                } else {
+                    Panel.copy(alpha = 0.38f)
+                }
+            )
+            .border(
+                1.dp,
+                if (isCurrent) Accent.copy(alpha = 0.55f) else Border.copy(alpha = 0.55f),
+                RoundedCornerShape(6.dp)
+            )
+    ) {
+        if (isCurrent) {
+            Box(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .width(2.dp)
+                    .background(Accent)
+                    .align(Alignment.CenterStart)
+            )
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 10.dp, vertical = 9.dp),
+            verticalArrangement = Arrangement.Center
+        ) {
+            if (showLiveBadge) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(Color(0xFFFF3448))
+                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                ) {
+                    Text(
+                        "LIVE",
+                        color = TextPrimary,
+                        fontSize = 6.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.sp
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+            }
+            if (hasProgram || showPlaceholder) {
+                Text(
+                    title.ifBlank { "No guide data" },
+                    color = if (hasProgram) TextPrimary else TextMuted,
+                    fontSize = if (hasProgram) 12.sp else 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    lineHeight = 14.sp,
+                    letterSpacing = 0.sp,
+                    maxLines = 4,
+                    overflow = TextOverflow.Clip
+                )
+            }
+            if (time.isNotBlank()) {
+                Text(
+                    time,
+                    color = TextSecondary,
+                    fontSize = 10.sp,
+                    letterSpacing = 0.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    lineHeight = 12.sp,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
+        }
+        if (isCurrent) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(progress.coerceIn(0f, 1f))
+                    .height(2.dp)
+                    .background(Accent)
+                    .align(Alignment.BottomStart)
+            )
         }
     }
 }
@@ -868,16 +1425,62 @@ private fun PlayerScreen(
     onChannelSelected: (Channel) -> Unit
 ) {
     val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val activity = context as? Activity
+    val mainActivity = activity as? MainActivity
+    val isPipMode = mainActivity?.isPipMode == true
     var playbackState by remember { mutableStateOf(Player.STATE_IDLE) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var streamFormat by remember { mutableStateOf(LiveStreamFormat.HLS) }
     val telemetryRecorder = remember { PlaybackTelemetryRecorder() }
     var telemetry by remember { mutableStateOf(telemetryRecorder.snapshot()) }
     val currentIndex = channels.indexOfFirst { it.id == channel.id }
     val previousChannel = channels.getOrNull(currentIndex - 1)
     val nextChannel = channels.getOrNull(currentIndex + 1)
 
-    val player = remember {
-        IptvPlayerFactory(context).createLivePlayer()
+    val player = remember(streamFormat) {
+        IptvPlayerFactory(context).createLivePlayer(streamFormat)
+    }
+
+    BackHandler(enabled = !isPipMode, onBack = onBack)
+
+    DisposableEffect(activity) {
+        val window = activity?.window
+        val keepScreenOnWasSet = ((window?.attributes?.flags ?: 0) and
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0
+        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            if (!keepScreenOnWasSet) {
+                window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
+    }
+
+    DisposableEffect(mainActivity) {
+        mainActivity?.setPipPlaybackEnabled(true)
+        onDispose {
+            mainActivity?.setPipPlaybackEnabled(false)
+        }
+    }
+
+    DisposableEffect(activity, isLandscape, isPipMode) {
+        val window = activity?.window
+        val insetsController = window?.let {
+            WindowCompat.getInsetsController(it, it.decorView)
+        }
+        if (isLandscape && !isPipMode) {
+            insetsController?.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            insetsController?.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            insetsController?.show(WindowInsetsCompat.Type.systemBars())
+        }
+        onDispose {
+            if (isLandscape && !isPipMode) {
+                insetsController?.show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
     }
 
     DisposableEffect(player) {
@@ -885,6 +1488,11 @@ private fun PlayerScreen(
             override fun onPlaybackStateChanged(playbackStateValue: Int) {
                 playbackState = playbackStateValue
                 telemetry = telemetryRecorder.onPlaybackStateChanged(playbackStateValue)
+                Log.d(
+                    "StreamHubPlayer",
+                    "state=$playbackStateValue channel=${player.currentMediaItem?.mediaId} " +
+                        "live=${player.isCurrentMediaItemLive} bufferedMs=${player.totalBufferedDuration}"
+                )
                 if (playbackStateValue != Player.STATE_IDLE) {
                     errorMessage = null
                 }
@@ -892,6 +1500,19 @@ private fun PlayerScreen(
 
             override fun onPlayerError(error: PlaybackException) {
                 val message = error.localizedMessage ?: "Unable to play this stream."
+                Log.w(
+                    "StreamHubPlayer",
+                    "error=${error.errorCodeName} channel=${player.currentMediaItem?.mediaId}",
+                    error
+                )
+                if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
+                    telemetry = telemetryRecorder.onError("Recovered at live edge")
+                    errorMessage = null
+                    player.seekToDefaultPosition()
+                    player.prepare()
+                    player.play()
+                    return
+                }
                 errorMessage = message
                 telemetry = telemetryRecorder.onError(message)
             }
@@ -905,18 +1526,35 @@ private fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(channel.id) {
+    LaunchedEffect(channel.id, streamFormat) {
         errorMessage = null
         playbackState = Player.STATE_BUFFERING
         telemetry = telemetryRecorder.onChannelLoad(channel.id, channel.name)
+        Log.i(
+            "StreamHubPlayer",
+            "loading channel=${channel.id} source=${streamFormat.name}"
+        )
         val mediaItem = IptvPlayerFactory(context).buildLiveMediaItem(
             streamUrl = channel.streamUrl,
             channelId = channel.id,
-            channelName = channel.name
+            channelName = channel.name,
+            format = streamFormat
         )
         player.setMediaItem(mediaItem)
         player.prepare()
         player.play()
+    }
+
+    LaunchedEffect(player, channel.id, streamFormat) {
+        while (true) {
+            delay(5_000)
+            Log.d(
+                "StreamHubPlayer",
+                "health channel=${channel.id} source=${streamFormat.name} " +
+                    "state=${player.playbackState} bufferedMs=${player.totalBufferedDuration} " +
+                    "liveOffsetMs=${player.currentLiveOffset}"
+            )
+        }
     }
 
     Box(
@@ -929,97 +1567,108 @@ private fun PlayerScreen(
             factory = { viewContext ->
                 PlayerView(viewContext).apply {
                     this.player = player
-                    setUseController(true)
+                    setUseController(!isPipMode)
                     setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
                 }
             },
             update = { playerView ->
                 playerView.player = player
+                playerView.setUseController(!isPipMode)
+                if (isPipMode) {
+                    playerView.hideController()
+                }
             },
             modifier = Modifier.fillMaxSize()
         )
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.statusBars)
-                .background(Color.Black.copy(alpha = 0.56f))
-                .padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            GlyphButton(
-                kind = GlyphKind.Back,
-                onClick = onBack,
-                modifier = Modifier.testTag(TestTags.PlayerBack)
-            )
-            Column(modifier = Modifier.padding(start = 12.dp).weight(1f)) {
-                Text(
-                    channel.name,
-                    color = TextPrimary,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp,
-                    letterSpacing = 0.sp
-                )
-                Text(
-                    channel.currentProgramTime,
-                    color = TextSecondary,
-                    fontSize = 12.sp,
-                    letterSpacing = 0.sp,
-                    modifier = Modifier.padding(top = 2.dp)
-                )
-            }
-            Box(
+        if (!isLandscape && !isPipMode) {
+            Row(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(PanelSoft.copy(alpha = 0.88f))
-                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.statusBars)
+                    .background(Color.Black.copy(alpha = 0.56f))
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    "LIVE",
-                    color = AccentAlt,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.sp
+                GlyphButton(
+                    kind = GlyphKind.Back,
+                    onClick = onBack,
+                    modifier = Modifier.testTag(TestTags.PlayerBack)
                 )
+                Column(modifier = Modifier.padding(start = 12.dp).weight(1f)) {
+                    Text(
+                        channel.name,
+                        color = TextPrimary,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                        letterSpacing = 0.sp
+                    )
+                    Text(
+                        channel.currentProgramTime,
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                        letterSpacing = 0.sp,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(PanelSoft.copy(alpha = 0.88f))
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        "LIVE",
+                        color = AccentAlt,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.sp
+                    )
+                }
             }
-        }
 
-        PlaybackTelemetryPanel(
-            telemetry = telemetry,
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .windowInsetsPadding(WindowInsets.statusBars)
-                .padding(top = 76.dp, start = 14.dp, end = 14.dp)
-        )
+            PlaybackTelemetryPanel(
+                telemetry = telemetry,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .windowInsetsPadding(WindowInsets.statusBars)
+                    .padding(top = 76.dp, start = 14.dp, end = 14.dp)
+            )
 
-        Row(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(18.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(Color.Black.copy(alpha = 0.56f))
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            OutlinedButton(
-                onClick = { previousChannel?.let(onChannelSelected) },
-                enabled = previousChannel != null,
-                shape = RoundedCornerShape(6.dp),
-                border = BorderStroke(1.dp, Border),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary)
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .padding(18.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.Black.copy(alpha = 0.56f))
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Text("Previous", fontSize = 12.sp, letterSpacing = 0.sp)
-            }
-            OutlinedButton(
-                onClick = { nextChannel?.let(onChannelSelected) },
-                enabled = nextChannel != null,
-                shape = RoundedCornerShape(6.dp),
-                border = BorderStroke(1.dp, Border),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary)
-            ) {
-                Text("Next", fontSize = 12.sp, letterSpacing = 0.sp)
+                OutlinedButton(
+                    onClick = { previousChannel?.let(onChannelSelected) },
+                    enabled = previousChannel != null,
+                    shape = RoundedCornerShape(6.dp),
+                    border = BorderStroke(1.dp, Border),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary)
+                ) {
+                    Text("Previous", fontSize = 12.sp, letterSpacing = 0.sp)
+                }
+                StreamFormatSelector(
+                    selected = streamFormat,
+                    enabled = supportsLiveStreamFormatSwitch(channel.streamUrl),
+                    onSelected = { streamFormat = it }
+                )
+                OutlinedButton(
+                    onClick = { nextChannel?.let(onChannelSelected) },
+                    enabled = nextChannel != null,
+                    shape = RoundedCornerShape(6.dp),
+                    border = BorderStroke(1.dp, Border),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary)
+                ) {
+                    Text("Next", fontSize = 12.sp, letterSpacing = 0.sp)
+                }
             }
         }
 
@@ -1039,7 +1688,7 @@ private fun PlayerScreen(
             }
         }
 
-        errorMessage?.let { message ->
+        errorMessage?.takeUnless { isPipMode }?.let { message ->
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -1064,6 +1713,47 @@ private fun PlayerScreen(
                     lineHeight = 18.sp,
                     letterSpacing = 0.sp,
                     modifier = Modifier.padding(top = 6.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StreamFormatSelector(
+    selected: LiveStreamFormat,
+    enabled: Boolean,
+    onSelected: (LiveStreamFormat) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .width(116.dp)
+            .height(36.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .border(1.dp, Border, RoundedCornerShape(6.dp)),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        LiveStreamFormat.entries.forEach { format ->
+            val isSelected = format == selected
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .background(if (isSelected) Accent.copy(alpha = 0.72f) else Color.Transparent)
+                    .clickable(enabled = enabled && !isSelected) { onSelected(format) },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    if (format == LiveStreamFormat.MPEG_TS) "TS" else format.label,
+                    color = when {
+                        !enabled -> TextMuted
+                        isSelected -> TextPrimary
+                        else -> TextSecondary
+                    },
+                    fontSize = 11.sp,
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                    letterSpacing = 0.sp,
+                    maxLines = 1
                 )
             }
         }
@@ -1928,6 +2618,10 @@ private fun AppScreen.toGlyphKind(): GlyphKind = when (this) {
 
 private fun String.toStableTag(): String {
     return lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-').ifBlank { "group" }
+}
+
+private fun String.toGuideTitle(): String {
+    return replace("|", "•").replace(Regex("\\s+"), " ").trim()
 }
 
 private enum class GlyphKind {

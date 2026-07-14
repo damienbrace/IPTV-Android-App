@@ -11,10 +11,11 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 
 @UnstableApi
 class IptvPlayerFactory(private val context: Context) {
-    fun createLivePlayer(): ExoPlayer {
+    fun createLivePlayer(format: LiveStreamFormat = LiveStreamFormat.HLS): ExoPlayer {
         val dataSourceFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(PlaybackDefaults.USER_AGENT)
             .setConnectTimeoutMs(PlaybackDefaults.CONNECT_TIMEOUT_MS)
@@ -23,13 +24,28 @@ class IptvPlayerFactory(private val context: Context) {
 
         val mediaSourceFactory = DefaultMediaSourceFactory(context)
             .setDataSourceFactory(dataSourceFactory)
+            .setLoadErrorHandlingPolicy(
+                DefaultLoadErrorHandlingPolicy(PlaybackDefaults.LIVE_MIN_LOAD_RETRY_COUNT)
+            )
 
+        val minBufferMs = when (format) {
+            LiveStreamFormat.HLS -> PlaybackDefaults.HLS_MIN_BUFFER_MS
+            LiveStreamFormat.MPEG_TS -> PlaybackDefaults.MPEG_TS_MIN_BUFFER_MS
+        }
+        val maxBufferMs = when (format) {
+            LiveStreamFormat.HLS -> PlaybackDefaults.HLS_MAX_BUFFER_MS
+            LiveStreamFormat.MPEG_TS -> PlaybackDefaults.MPEG_TS_MAX_BUFFER_MS
+        }
+        val rebufferMs = when (format) {
+            LiveStreamFormat.HLS -> PlaybackDefaults.HLS_REBUFFER_MS
+            LiveStreamFormat.MPEG_TS -> PlaybackDefaults.MPEG_TS_REBUFFER_MS
+        }
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                PlaybackDefaults.LIVE_MIN_BUFFER_MS,
-                PlaybackDefaults.LIVE_MAX_BUFFER_MS,
+                minBufferMs,
+                maxBufferMs,
                 PlaybackDefaults.LIVE_PLAYBACK_BUFFER_MS,
-                PlaybackDefaults.LIVE_REBUFFER_MS
+                rebufferMs
             )
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
@@ -56,13 +72,29 @@ class IptvPlayerFactory(private val context: Context) {
     fun buildLiveMediaItem(
         streamUrl: String,
         channelId: String,
-        channelName: String
+        channelName: String,
+        format: LiveStreamFormat = LiveStreamFormat.HLS
     ): MediaItem {
-        return MediaItem.Builder()
-            .setUri(streamUrl)
+        val resolvedStreamUrl = resolveLiveStreamUrl(streamUrl, format)
+        val isHls = format == LiveStreamFormat.HLS
+        val builder = MediaItem.Builder()
+            .setUri(resolvedStreamUrl)
             .setMediaId(channelId)
-            .setMimeType(MimeTypes.APPLICATION_M3U8.takeIf { streamUrl.endsWith(".m3u8", ignoreCase = true) })
+            .setMimeType(MimeTypes.APPLICATION_M3U8.takeIf { isHls })
             .setTag(channelName)
-            .build()
+
+        if (isHls) {
+            builder.setLiveConfiguration(
+                MediaItem.LiveConfiguration.Builder()
+                    .setTargetOffsetMs(PlaybackDefaults.LIVE_TARGET_OFFSET_MS)
+                    .setMinOffsetMs(PlaybackDefaults.LIVE_MIN_OFFSET_MS)
+                    .setMaxOffsetMs(PlaybackDefaults.LIVE_MAX_OFFSET_MS)
+                    .setMinPlaybackSpeed(PlaybackDefaults.LIVE_MIN_PLAYBACK_SPEED)
+                    .setMaxPlaybackSpeed(PlaybackDefaults.LIVE_MAX_PLAYBACK_SPEED)
+                    .build()
+            )
+        }
+
+        return builder.build()
     }
 }

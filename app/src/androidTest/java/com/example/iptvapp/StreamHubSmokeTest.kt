@@ -46,7 +46,19 @@ class StreamHubSmokeTest {
         composeRule.onNodeWithText("LIVE").assertIsDisplayed()
 
         composeRule.onNodeWithTag(TestTags.PlayerBack).performClick()
-        composeRule.onNodeWithText("All Channels").assertIsDisplayed()
+        composeRule.onNodeWithTag("${TestTags.ChannelRowPrefix}seven-news").assertIsDisplayed()
+    }
+
+    @Test
+    fun systemBackReturnsToPreviousPrimaryScreen() {
+        composeRule.onNodeWithTag(TestTags.SearchNav).performClick()
+        composeRule.onNodeWithTag(TestTags.PlaylistsNav).performClick()
+
+        composeRule.activityRule.scenario.onActivity {
+            it.onBackPressedDispatcher.onBackPressed()
+        }
+
+        composeRule.onNodeWithText("Recent Searches").assertIsDisplayed()
     }
 
     @Test

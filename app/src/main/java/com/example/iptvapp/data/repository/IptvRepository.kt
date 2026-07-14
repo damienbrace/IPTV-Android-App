@@ -23,6 +23,8 @@ interface IptvRepository {
 
     suspend fun refreshPlaylist(playlistId: String): Result<Unit>
 
+    suspend fun refreshGuide(channelIds: List<String>): Result<Unit>
+
     suspend fun deletePlaylist(playlistId: String)
 
     suspend fun toggleFavorite(channelId: String)

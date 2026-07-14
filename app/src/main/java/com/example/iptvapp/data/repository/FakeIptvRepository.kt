@@ -124,6 +124,10 @@ class FakeIptvRepository(
         return Result.success(Unit)
     }
 
+    override suspend fun refreshGuide(channelIds: List<String>): Result<Unit> {
+        return Result.success(Unit)
+    }
+
     override suspend fun deletePlaylist(playlistId: String) {
         state.update { current ->
             current.copy(playlists = current.playlists.filterNot { it.id == playlistId })

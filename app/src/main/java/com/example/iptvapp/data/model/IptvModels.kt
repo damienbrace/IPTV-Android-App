@@ -16,6 +16,16 @@ data class Channel(
     val favorite: Boolean = false
 )
 
+data class GuideProgramBlock(
+    val title: String,
+    val time: String,
+    val startsAtEpochMillis: Long,
+    val endsAtEpochMillis: Long,
+    val progress: Float = 0f,
+    val isCurrent: Boolean = false,
+    val isLiveEvent: Boolean = false
+)
+
 data class GuideProgram(
     val channel: Channel,
     val primaryTitle: String,
@@ -23,7 +33,8 @@ data class GuideProgram(
     val primaryTime: String = "",
     val secondaryTime: String = "",
     val progress: Float = 0f,
-    val startsAtHalfHour: Boolean = false
+    val startsAtHalfHour: Boolean = false,
+    val timeline: List<GuideProgramBlock> = emptyList()
 )
 
 data class IptvPlaylist(

@@ -17,8 +17,14 @@ interface IptvDao {
     @Query("SELECT * FROM channels ORDER BY number ASC")
     fun observeChannels(): Flow<List<ChannelEntity>>
 
-    @Query("SELECT * FROM epg_programs ORDER BY startsAtEpochMillis ASC")
-    fun observePrograms(): Flow<List<EpgProgramEntity>>
+    @Query("SELECT * FROM epg_programs WHERE channelId IN (:channelIds) ORDER BY startsAtEpochMillis ASC")
+    fun observePrograms(channelIds: List<String>): Flow<List<EpgProgramEntity>>
+
+    @Query("SELECT * FROM channels WHERE id IN (:channelIds)")
+    suspend fun getChannels(channelIds: List<String>): List<ChannelEntity>
+
+    @Query("SELECT * FROM epg_programs WHERE channelId IN (:channelIds) ORDER BY startsAtEpochMillis ASC")
+    suspend fun getPrograms(channelIds: List<String>): List<EpgProgramEntity>
 
     @Upsert
     suspend fun upsertPlaylist(playlist: PlaylistEntity)

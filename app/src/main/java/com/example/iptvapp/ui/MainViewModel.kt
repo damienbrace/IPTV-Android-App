@@ -128,6 +128,12 @@ class MainViewModel(
         }
     }
 
+    fun refreshGuide(channelIds: List<String>) {
+        viewModelScope.launch {
+            repository.refreshGuide(channelIds)
+        }
+    }
+
     fun clearPlaylistRefreshState() {
         _playlistRefreshState.value = PlaylistRefreshState.Idle
     }
