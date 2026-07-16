@@ -8,6 +8,7 @@ import org.xml.sax.InputSource
 import org.xml.sax.helpers.DefaultHandler
 import java.io.BufferedInputStream
 import java.io.BufferedReader
+import java.io.FilterInputStream
 import java.io.InputStream
 import java.io.StringReader
 import java.net.HttpURLConnection
@@ -240,14 +241,16 @@ class XcodesApiClient {
         targetChannelIds: Set<String>,
         targetChannelNames: Set<String>,
         windowStartEpochMillis: Long,
-        windowEndEpochMillis: Long
+        windowEndEpochMillis: Long,
+        onProgress: (Float?) -> Unit = {},
+        beforeRead: () -> Unit = {}
     ): Result<List<XcodesXmltvProgram>> = withContext(Dispatchers.IO) {
         runCatching {
             if (targetChannelIds.isEmpty() && targetChannelNames.isEmpty()) return@runCatching emptyList()
             val connection = (buildXmltvUrl(serverUrl, username, password).toURL().openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = 8_000
-                readTimeout = 45_000
+                readTimeout = 180_000
                 instanceFollowRedirects = true
                 setRequestProperty("User-Agent", "StreamHubTV/1.0")
                 setRequestProperty("Accept-Encoding", "gzip")
@@ -257,13 +260,16 @@ class XcodesApiClient {
                 if (responseCode !in 200..299) {
                     error("XMLTV returned HTTP $responseCode")
                 }
-                parseXmltv(
-                    source = InputSource(connection.decodedInputStream()),
+                onProgress(0f)
+                val programs = parseXmltv(
+                    source = InputSource(connection.decodedInputStream(onProgress, beforeRead)),
                     targetChannelIds = targetChannelIds,
                     targetChannelNames = targetChannelNames,
                     windowStartEpochMillis = windowStartEpochMillis,
                     windowEndEpochMillis = windowEndEpochMillis
                 )
+                onProgress(1f)
+                programs
             } finally {
                 connection.disconnect()
             }
@@ -569,7 +575,10 @@ class XcodesApiClient {
             .lowercase()
     }
 
-    private fun HttpURLConnection.decodedInputStream(): InputStream {
+    private fun HttpURLConnection.decodedInputStream(
+        onProgress: (Float?) -> Unit,
+        beforeRead: () -> Unit
+    ): InputStream {
         val stream = BufferedInputStream(inputStream).apply {
             mark(GZIP_HEADER_SIZE)
         }
@@ -578,10 +587,16 @@ class XcodesApiClient {
         stream.reset()
         val isGzip = contentEncoding.equals("gzip", ignoreCase = true) ||
             (firstByte == GZIP_MAGIC_FIRST_BYTE && secondByte == GZIP_MAGIC_SECOND_BYTE)
+        val progressStream = ProgressInputStream(
+            input = stream,
+            totalBytes = contentLengthLong,
+            onProgress = onProgress,
+            beforeRead = beforeRead
+        )
         return if (isGzip) {
-            GZIPInputStream(stream)
+            GZIPInputStream(progressStream)
         } else {
-            stream
+            progressStream
         }
     }
 
@@ -670,5 +685,43 @@ class XcodesApiClient {
         const val MIN_FUZZY_GUIDE_KEY_LENGTH = 8
         val XmltvDateTimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
         val XmltvTimeRegex = Regex("^(\\d{14})(?:\\s*([+-]\\d{2}:?\\d{2}))?.*")
+    }
+}
+
+private class ProgressInputStream(
+    input: InputStream,
+    private val totalBytes: Long,
+    private val onProgress: (Float?) -> Unit,
+    private val beforeRead: () -> Unit
+) : FilterInputStream(input) {
+    private var bytesRead = 0L
+    private var lastReportedPercent = -1
+
+    init {
+        onProgress(if (totalBytes > 0L) 0f else null)
+    }
+
+    override fun read(): Int {
+        beforeRead()
+        val value = super.read()
+        if (value != -1) reportBytesRead(1)
+        return value
+    }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        beforeRead()
+        val count = super.read(buffer, offset, length)
+        if (count > 0) reportBytesRead(count)
+        return count
+    }
+
+    private fun reportBytesRead(count: Int) {
+        if (totalBytes <= 0L) return
+        bytesRead += count
+        val percent = ((bytesRead * 100L) / totalBytes).coerceIn(0L, 100L).toInt()
+        if (percent != lastReportedPercent) {
+            lastReportedPercent = percent
+            onProgress(percent / 100f)
+        }
     }
 }

@@ -120,11 +120,23 @@ class FakeIptvRepository(
         return xcodesApiClient.testConnection(serverUrl, username, password).map { }
     }
 
-    override suspend fun refreshPlaylist(playlistId: String): Result<Unit> {
+    override suspend fun refreshPlaylist(
+        playlistId: String,
+        onProgress: (progress: Float?, message: String) -> Unit
+    ): Result<Unit> {
+        onProgress(1f, "Full guide sync complete.")
         return Result.success(Unit)
     }
 
-    override suspend fun refreshGuide(channelIds: List<String>): Result<Unit> {
+    override suspend fun refreshGuide(
+        channelIds: List<String>,
+        onProgress: (completed: Int, total: Int) -> Unit
+    ): Result<Unit> {
+        onProgress(channelIds.size, channelIds.size)
+        return Result.success(Unit)
+    }
+
+    override suspend fun preloadGuide(channelIds: List<String>): Result<Unit> {
         return Result.success(Unit)
     }
 

@@ -29,28 +29,35 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -58,6 +65,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
@@ -83,6 +91,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.tooling.preview.Preview
@@ -96,6 +105,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.ui.PlayerView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -103,19 +113,34 @@ import androidx.core.view.WindowInsetsControllerCompat
 import com.example.iptvapp.core.playback.PlaybackDiagnosticsStore
 import com.example.iptvapp.core.playback.IptvPlayerFactory
 import com.example.iptvapp.core.playback.LiveStreamFormat
+import com.example.iptvapp.core.playback.PlaybackMetrics
 import com.example.iptvapp.core.playback.PlaybackTelemetryRecorder
 import com.example.iptvapp.core.playback.PlaybackTelemetrySnapshot
+import com.example.iptvapp.core.playback.codecLabel
+import com.example.iptvapp.core.playback.formatBitrate
+import com.example.iptvapp.core.playback.formatPlaybackDuration
+import com.example.iptvapp.core.playback.playbackStateLabel
+import com.example.iptvapp.core.playback.resolutionLabel
+import com.example.iptvapp.core.playback.resolveLiveOffset
 import com.example.iptvapp.core.playback.supportsLiveStreamFormatSwitch
 import com.example.iptvapp.data.model.Channel
+import com.example.iptvapp.data.model.CountryGroupFilter
 import com.example.iptvapp.data.model.GuideProgram
+import com.example.iptvapp.data.model.GuideProgramBlock
 import com.example.iptvapp.data.model.IptvPlaylist
+import com.example.iptvapp.data.model.availableCountryGroupFilters
+import com.example.iptvapp.data.model.matchesSelectedCountryFilters
+import com.example.iptvapp.data.model.isCurrentLiveSportsTitle
 import com.example.iptvapp.ui.ConnectionTestState
+import com.example.iptvapp.ui.GuideLoadState
 import com.example.iptvapp.ui.MainViewModel
 import com.example.iptvapp.ui.PlaylistSaveState
 import com.example.iptvapp.ui.PlaylistRefreshState
 import com.example.iptvapp.ui.theme.IPTVAppTheme
+import com.example.iptvapp.sync.EpgSyncStatus
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.delay
+import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -140,11 +165,15 @@ private val TextMuted = Color(0xFF7D879A)
 private val Success = Color(0xFF36D37E)
 private val TimeSlotFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("h:mm a")
 private val DaySlotFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("EEE d")
+private val ProgramDateFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("EEE d MMM")
 private const val TimelineDays = 7
 private const val TimelineSlotsPerDay = 48
 private const val TimelineCellCount = TimelineSlotsPerDay
 private const val TimelineSlotMillis = 30L * 60L * 1_000L
 private const val TimelineDurationMillis = 24L * 60L * 60L * 1_000L
+private const val ClockTickMarginMillis = 50L
+private const val RecentlyWatchedGroup = "Recently Watched"
+private const val LiveSportsGroup = "Live Sports"
 private val TimelineSlotWidth = 180.dp
 private val TimelineProgramGap = 4.dp
 
@@ -159,6 +188,12 @@ object TestTags {
     const val GroupRowPrefix = "group_"
     const val PlayerScreen = "screen_player"
     const val PlayerBack = "player_back"
+    const val PlayerDiagnosticsToggle = "player_diagnostics_toggle"
+    const val PlayerDiagnosticsPanel = "player_diagnostics_panel"
+    const val CountryFilterPrefix = "country_filter_"
+    const val CountryFilterEdit = "country_filter_edit"
+    const val CountryFilterOptionPrefix = "country_filter_option_"
+    const val GuideLoading = "guide_loading"
 }
 
 class MainActivity : ComponentActivity() {
@@ -200,12 +235,22 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel(factory = MainView
     val connectionTestState by viewModel.connectionTestState.collectAsState()
     val playlistSaveState by viewModel.playlistSaveState.collectAsState()
     val playlistRefreshState by viewModel.playlistRefreshState.collectAsState()
+    val guideLoadState by viewModel.guideLoadState.collectAsState()
+    val frequentChannelGroups by viewModel.frequentChannelGroups.collectAsState()
+    val recentlyWatchedChannelIds by viewModel.recentlyWatchedChannelIds.collectAsState()
+    val enabledCountryFilters by viewModel.enabledCountryFilters.collectAsState()
+    val epgSyncStatus by viewModel.epgSyncStatus.collectAsState()
     val diagnostics by PlaybackDiagnosticsStore.recentSnapshots.collectAsState()
     var currentScreen by remember { mutableStateOf(AppScreen.Live) }
     var screenHistory by remember { mutableStateOf(emptyList<AppScreen>()) }
     var selectedLiveGroup by remember { mutableStateOf<String?>(null) }
     var showAddPlaylist by remember { mutableStateOf(false) }
     var selectedChannel by remember { mutableStateOf<Channel?>(null) }
+
+    fun playChannel(channel: Channel) {
+        viewModel.recordChannelWatch(channel.id)
+        selectedChannel = channel
+    }
 
     fun navigateToScreen(screen: AppScreen) {
         if (screen != currentScreen) {
@@ -266,7 +311,7 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel(factory = MainView
                             channel = playingChannel,
                             channels = homeState.channels,
                             onBack = { selectedChannel = null },
-                            onChannelSelected = { selectedChannel = it }
+                            onChannelSelected = ::playChannel
                         )
                     } else if (showAddPlaylist) {
                         AddPlaylistScreen(
@@ -288,20 +333,28 @@ private fun StreamHubApp(viewModel: MainViewModel = viewModel(factory = MainView
                                 channels = homeState.channels,
                                 guidePrograms = homeState.guidePrograms,
                                 categories = homeState.categories,
+                                guideLoadState = guideLoadState,
+                                frequentGroups = frequentChannelGroups,
+                                recentlyWatchedChannelIds = recentlyWatchedChannelIds,
+                                enabledCountryFilters = enabledCountryFilters,
                                 selectedGroup = selectedLiveGroup,
                                 onSelectedGroupChange = { selectedLiveGroup = it },
+                                onGroupVisited = viewModel::recordChannelGroupVisit,
                                 onRefreshGuide = viewModel::refreshGuide,
+                                onPreloadFrequentGroups = viewModel::preloadFrequentGuideGroups,
+                                onUpdateCountryFilters = viewModel::updateCountryFilters,
                                 onToggleFavorite = viewModel::toggleFavorite,
-                                onPlayChannel = { selectedChannel = it }
+                                onPlayChannel = ::playChannel
                             )
                             AppScreen.Search -> SearchScreen(
                                 channels = homeState.channels,
                                 recentSearches = homeState.recentSearches,
-                                onPlayChannel = { selectedChannel = it }
+                                onPlayChannel = ::playChannel
                             )
                             AppScreen.Playlists -> PlaylistsScreen(
                                 playlists = homeState.playlists,
                                 refreshState = playlistRefreshState,
+                                epgSyncStatus = epgSyncStatus,
                                 onAddPlaylist = { showAddPlaylist = true },
                                 onRefreshPlaylist = viewModel::refreshPlaylist,
                                 onDeletePlaylist = viewModel::deletePlaylist,
@@ -341,13 +394,91 @@ private fun LiveScreen(
     channels: List<Channel>,
     guidePrograms: List<GuideProgram>,
     categories: List<String>,
+    guideLoadState: GuideLoadState,
+    frequentGroups: List<String>,
+    recentlyWatchedChannelIds: List<String>,
+    enabledCountryFilters: List<CountryGroupFilter>,
     selectedGroup: String?,
     onSelectedGroupChange: (String?) -> Unit,
+    onGroupVisited: (String) -> Unit,
     onRefreshGuide: (List<String>) -> Unit,
+    onPreloadFrequentGroups: (List<List<String>>) -> Unit,
+    onUpdateCountryFilters: (List<CountryGroupFilter>) -> Unit,
     onToggleFavorite: (String) -> Unit,
     onPlayChannel: (Channel) -> Unit
 ) {
-    val groups = categories.ifEmpty { listOf("All Channels") }
+    var selectedCountryFilters by remember { mutableStateOf(emptySet<CountryGroupFilter>()) }
+    var showCountryFilterEditor by remember { mutableStateOf(false) }
+    val availableCountryFilters = remember(categories) {
+        availableCountryGroupFilters(categories)
+    }
+    val visibleCountryFilters = remember(enabledCountryFilters, availableCountryFilters) {
+        enabledCountryFilters.filter { it in availableCountryFilters }
+            .ifEmpty { CountryGroupFilter.DefaultFilters.filter { it in availableCountryFilters } }
+    }
+    LaunchedEffect(visibleCountryFilters) {
+        selectedCountryFilters = selectedCountryFilters.intersect(visibleCountryFilters.toSet())
+    }
+    val allRecentlyWatchedChannels = remember(channels, recentlyWatchedChannelIds) {
+        val channelsById = channels.associateBy { it.id }
+        recentlyWatchedChannelIds.mapNotNull(channelsById::get)
+    }
+    val allCurrentLiveSportsChannels = remember(guidePrograms) {
+        guidePrograms.asSequence()
+            .filter { program ->
+                isCurrentLiveSportsTitle(
+                    title = program.primaryTitle,
+                    channelName = program.channel.name,
+                    channelCategory = program.channel.category
+                )
+            }
+            .map { it.channel }
+            .distinctBy { it.id }
+            .sortedBy { it.number }
+            .toList()
+    }
+    val countryChannels = remember(channels, selectedCountryFilters) {
+        channels.filter { channel ->
+            matchesSelectedCountryFilters(channel.category, selectedCountryFilters)
+        }
+    }
+    val recentlyWatchedChannels = remember(allRecentlyWatchedChannels, selectedCountryFilters) {
+        allRecentlyWatchedChannels.filter { channel ->
+            matchesSelectedCountryFilters(channel.category, selectedCountryFilters)
+        }
+    }
+    val currentLiveSportsChannels = remember(allCurrentLiveSportsChannels, selectedCountryFilters) {
+        allCurrentLiveSportsChannels.filter { channel ->
+            matchesSelectedCountryFilters(channel.category, selectedCountryFilters)
+        }
+    }
+    val groups = remember(
+        categories,
+        recentlyWatchedChannels,
+        currentLiveSportsChannels,
+        selectedCountryFilters
+    ) {
+        val providerGroups = categories
+            .ifEmpty { listOf("All Channels") }
+            .filterNot { it == RecentlyWatchedGroup || it == LiveSportsGroup }
+            .filter { group ->
+                group == "All Channels" ||
+                    group == "Favourites" ||
+                    matchesSelectedCountryFilters(group, selectedCountryFilters)
+            }
+        val insertionIndex = (providerGroups.indexOf("Favourites") + 1)
+            .takeIf { it > 0 }
+            ?: minOf(1, providerGroups.size)
+        providerGroups.toMutableList().apply {
+            var nextIndex = insertionIndex
+            if (recentlyWatchedChannels.isNotEmpty()) {
+                add(nextIndex++, RecentlyWatchedGroup)
+            }
+            if (currentLiveSportsChannels.isNotEmpty()) {
+                add(nextIndex, LiveSportsGroup)
+            }
+        }
+    }
     LaunchedEffect(groups) {
         if (selectedGroup != null && selectedGroup !in groups) {
             onSelectedGroupChange(null)
@@ -356,23 +487,49 @@ private fun LiveScreen(
     val guideProgramsByChannelId = remember(guidePrograms) {
         guidePrograms.associateBy { it.channel.id }
     }
-    val channelCountsByGroup = remember(channels) {
-        channels.groupingBy { it.category }.eachCount()
+    val channelCountsByGroup = remember(countryChannels) {
+        countryChannels.groupingBy { it.category }.eachCount()
     }
-    val favouriteCount = remember(channels) { channels.count { it.favorite } }
-    val visibleChannels = remember(channels, selectedGroup) {
+    val channelsByGroup = remember(countryChannels) { countryChannels.groupBy { it.category } }
+    val channelIdsByGroup = remember(channelsByGroup) {
+        channelsByGroup.mapValues { (_, groupChannels) -> groupChannels.map { it.id } }
+    }
+    val favouriteCount = remember(countryChannels) { countryChannels.count { it.favorite } }
+    val visibleChannels = remember(
+        countryChannels,
+        selectedGroup,
+        recentlyWatchedChannels,
+        currentLiveSportsChannels
+    ) {
         when (selectedGroup) {
             null -> emptyList()
-            "All Channels" -> channels
-            "Favourites" -> channels.filter { it.favorite }
-            else -> channels.filter { it.category == selectedGroup }
+            "All Channels" -> countryChannels
+            "Favourites" -> countryChannels.filter { it.favorite }
+            RecentlyWatchedGroup -> recentlyWatchedChannels
+            LiveSportsGroup -> currentLiveSportsChannels
+            else -> channelsByGroup[selectedGroup].orEmpty()
         }
     }
-    LaunchedEffect(selectedGroup) {
+    val groupListState = rememberLazyListState()
+    LaunchedEffect(selectedCountryFilters) {
+        groupListState.scrollToItem(0)
+    }
+    LaunchedEffect(frequentGroups, channelIdsByGroup) {
+        val channelGroups = frequentGroups.mapNotNull { group ->
+            channelIdsByGroup[group].orEmpty().takeIf { it.isNotEmpty() }
+        }
+        onPreloadFrequentGroups(channelGroups)
+    }
+    val visibleChannelIds = remember(visibleChannels) {
+        visibleChannels.mapTo(mutableSetOf()) { it.id }
+    }
+    LaunchedEffect(selectedGroup, visibleChannelIds) {
         if (selectedGroup != null) {
             onRefreshGuide(visibleChannels.map { it.id })
         }
     }
+    val isGuideLoading = guideLoadState.isLoading &&
+        guideLoadState.channelIds.any { it in visibleChannelIds }
     val titleText = selectedGroup?.toGuideTitle() ?: "Live TV"
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -394,13 +551,47 @@ private fun LiveScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                         if (selectedGroup != null) {
-                            Text(
-                                "${visibleChannels.size} channels",
-                                color = TextSecondary,
-                                fontSize = 13.sp,
-                                letterSpacing = 0.sp,
-                                modifier = Modifier.padding(top = 2.dp)
-                            )
+                            Row(
+                                modifier = Modifier.padding(top = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "${visibleChannels.size} channels",
+                                    color = TextSecondary,
+                                    fontSize = 13.sp,
+                                    letterSpacing = 0.sp
+                                )
+                                if (isGuideLoading) {
+                                    if (guideLoadState.totalChannels > 0) {
+                                        LinearProgressIndicator(
+                                            progress = { guideLoadState.progress.coerceIn(0f, 1f) },
+                                            color = Accent,
+                                            trackColor = Border.copy(alpha = 0.55f),
+                                            modifier = Modifier
+                                                .padding(start = 8.dp)
+                                                .width(52.dp)
+                                                .height(3.dp)
+                                                .testTag(TestTags.GuideLoading)
+                                        )
+                                        Text(
+                                            "${(guideLoadState.progress * 100).toInt()}%",
+                                            color = TextSecondary,
+                                            fontSize = 10.sp,
+                                            letterSpacing = 0.sp,
+                                            modifier = Modifier.padding(start = 6.dp)
+                                        )
+                                    } else {
+                                        CircularProgressIndicator(
+                                            color = Accent,
+                                            strokeWidth = 1.5.dp,
+                                            modifier = Modifier
+                                                .padding(start = 8.dp)
+                                                .size(12.dp)
+                                                .testTag(TestTags.GuideLoading)
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -416,7 +607,23 @@ private fun LiveScreen(
         )
 
         if (selectedGroup == null) {
+            CountryGroupFilterControls(
+                filters = visibleCountryFilters,
+                selected = selectedCountryFilters,
+                onSelected = { filter ->
+                    selectedCountryFilters = if (filter in selectedCountryFilters) {
+                        selectedCountryFilters - filter
+                    } else {
+                        selectedCountryFilters + filter
+                    }
+                },
+                onEdit = { showCountryFilterEditor = true },
+                modifier = Modifier
+                    .padding(horizontal = 18.dp)
+                    .padding(bottom = 8.dp)
+            )
             LazyColumn(
+                state = groupListState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     start = 18.dp,
@@ -430,11 +637,16 @@ private fun LiveScreen(
                     LiveGroupRow(
                         group = group,
                         channelCount = when (group) {
-                            "All Channels" -> channels.size
+                            "All Channels" -> countryChannels.size
                             "Favourites" -> favouriteCount
+                            RecentlyWatchedGroup -> recentlyWatchedChannels.size
+                            LiveSportsGroup -> currentLiveSportsChannels.size
                             else -> channelCountsByGroup[group] ?: 0
                         },
-                        onClick = { onSelectedGroupChange(group) }
+                        onClick = {
+                            onGroupVisited(group)
+                            onSelectedGroupChange(group)
+                        }
                     )
                 }
             }
@@ -442,10 +654,24 @@ private fun LiveScreen(
             LiveTimelineGuide(
                 channels = visibleChannels,
                 programsByChannelId = guideProgramsByChannelId,
+                isGuideLoading = isGuideLoading,
                 onToggleFavorite = onToggleFavorite,
                 onPlayChannel = onPlayChannel
             )
         }
+    }
+
+    if (showCountryFilterEditor) {
+        CountryFilterEditorDialog(
+            availableFilters = availableCountryFilters,
+            enabledFilters = visibleCountryFilters,
+            onSave = { filters ->
+                onUpdateCountryFilters(filters)
+                selectedCountryFilters = selectedCountryFilters.intersect(filters.toSet())
+                showCountryFilterEditor = false
+            },
+            onDismiss = { showCountryFilterEditor = false }
+        )
     }
 }
 
@@ -453,14 +679,20 @@ private fun LiveScreen(
 private fun LiveTimelineGuide(
     channels: List<Channel>,
     programsByChannelId: Map<String, GuideProgram>,
+    isGuideLoading: Boolean,
     onToggleFavorite: (String) -> Unit,
     onPlayChannel: (Channel) -> Unit
 ) {
     var now by remember { mutableStateOf(LocalDateTime.now()) }
+    var programInfo by remember { mutableStateOf<Pair<Channel, GuideProgramBlock>?>(null) }
     LaunchedEffect(Unit) {
         while (true) {
-            now = LocalDateTime.now()
-            delay(60_000)
+            val currentEpochMillis = System.currentTimeMillis()
+            now = Instant.ofEpochMilli(currentEpochMillis)
+                .atZone(ZoneId.systemDefault())
+                .toLocalDateTime()
+            val millisUntilNextMinute = 60_000L - (currentEpochMillis % 60_000L)
+            delay(millisUntilNextMinute + ClockTickMarginMillis)
         }
     }
     val timelineScroll = rememberScrollState()
@@ -473,6 +705,7 @@ private fun LiveTimelineGuide(
         selectedDate.atStartOfDay()
     }
     val slotStartEpochMillis = slotStart.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+    val nowEpochMillis = now.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
     val slotLabels = List(TimelineCellCount) { index -> slotStart.plusMinutes(index * 30L) }
     val secondsIntoSlot = ChronoUnit.SECONDS.between(slotStart, now).coerceIn(0L, 30L * 60L)
     val currentTimeOffset = if (selectedDayOffset == 0) {
@@ -508,13 +741,23 @@ private fun LiveTimelineGuide(
                     channel = channel,
                     program = programsByChannelId[channel.id],
                     timelineStartEpochMillis = slotStartEpochMillis,
+                    nowEpochMillis = nowEpochMillis,
                     currentTimeOffset = currentTimeOffset,
+                    isGuideLoading = isGuideLoading,
                     scrollState = timelineScroll,
                     onFavoriteClick = { onToggleFavorite(channel.id) },
+                    onProgramInfo = { block -> programInfo = channel to block },
                     onPlayClick = { onPlayChannel(channel) }
                 )
             }
         }
+    }
+    programInfo?.let { (channel, block) ->
+        ProgramInfoDialog(
+            channel = channel,
+            program = block,
+            onDismiss = { programInfo = null }
+        )
     }
 }
 
@@ -645,9 +888,12 @@ private fun GuideTimelineRow(
     channel: Channel,
     program: GuideProgram?,
     timelineStartEpochMillis: Long,
+    nowEpochMillis: Long,
     currentTimeOffset: Dp?,
+    isGuideLoading: Boolean,
     scrollState: androidx.compose.foundation.ScrollState,
     onFavoriteClick: () -> Unit,
+    onProgramInfo: (GuideProgramBlock) -> Unit,
     onPlayClick: () -> Unit
 ) {
     Row(
@@ -704,9 +950,10 @@ private fun GuideTimelineRow(
                             title = "",
                             time = "",
                             isCurrent = false,
-                            showLiveBadge = false,
                             progress = 0f,
                             showPlaceholder = true,
+                            placeholderText = if (isGuideLoading) "Loading guide" else "No guide data",
+                            onInfoClick = null,
                             onClick = onPlayClick,
                             modifier = Modifier.width(TimelineSlotWidth - TimelineProgramGap)
                         )
@@ -719,13 +966,25 @@ private fun GuideTimelineRow(
                             val startOffset = TimelineSlotWidth * startSlots
                             val programWidth = (TimelineSlotWidth * durationSlots - TimelineProgramGap)
                                 .coerceAtLeast(52.dp)
+                            val isCurrent = block.startsAtEpochMillis <= nowEpochMillis &&
+                                block.endsAtEpochMillis > nowEpochMillis
+                            val liveProgress = if (isCurrent) {
+                                val duration = block.endsAtEpochMillis - block.startsAtEpochMillis
+                                if (duration > 0L) {
+                                    (nowEpochMillis - block.startsAtEpochMillis).toFloat() / duration.toFloat()
+                                } else {
+                                    0f
+                                }
+                            } else {
+                                0f
+                            }
                             GuideProgramCell(
                                 title = block.title,
                                 time = block.time,
-                                isCurrent = block.isCurrent,
-                                showLiveBadge = block.isLiveEvent,
-                                progress = block.progress,
+                                isCurrent = isCurrent,
+                                progress = liveProgress,
                                 showPlaceholder = false,
+                                onInfoClick = { onProgramInfo(block) },
                                 onClick = onPlayClick,
                                 modifier = Modifier
                                     .offset(x = startOffset)
@@ -738,8 +997,8 @@ private fun GuideTimelineRow(
                             modifier = Modifier
                                 .padding(start = currentTimeOffset)
                                 .fillMaxHeight()
-                                .width(2.dp)
-                                .background(Accent)
+                                .width(1.dp)
+                                .background(Accent.copy(alpha = 0.32f))
                                 .align(Alignment.CenterStart)
                         )
                     }
@@ -773,7 +1032,26 @@ private fun GuideChannelCard(
             .background(Panel.copy(alpha = 0.92f))
             .border(1.dp, Border.copy(alpha = 0.28f), RoundedCornerShape(6.dp))
     ) {
-        Box(modifier = Modifier.align(Alignment.Center)) {
+        Text(
+            channel.name,
+            color = TextSecondary,
+            fontSize = 9.sp,
+            lineHeight = 10.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = 0.sp,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .padding(start = 4.dp, top = 5.dp, end = 4.dp)
+        )
+        Box(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .offset(y = 6.dp)
+        ) {
             LogoBadge(channel = channel)
         }
         Row(
@@ -815,9 +1093,10 @@ private fun GuideProgramCell(
     title: String,
     time: String,
     isCurrent: Boolean,
-    showLiveBadge: Boolean,
     progress: Float,
     showPlaceholder: Boolean,
+    placeholderText: String = "No guide data",
+    onInfoClick: (() -> Unit)?,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -852,29 +1131,17 @@ private fun GuideProgramCell(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 10.dp, vertical = 9.dp),
+                .padding(
+                    start = 10.dp,
+                    end = 10.dp,
+                    top = 8.dp,
+                    bottom = if (onInfoClick != null) 25.dp else 8.dp
+                ),
             verticalArrangement = Arrangement.Center
         ) {
-            if (showLiveBadge) {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(3.dp))
-                        .background(Color(0xFFFF3448))
-                        .padding(horizontal = 4.dp, vertical = 1.dp)
-                ) {
-                    Text(
-                        "LIVE",
-                        color = TextPrimary,
-                        fontSize = 6.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.sp
-                    )
-                }
-                Spacer(modifier = Modifier.height(4.dp))
-            }
             if (hasProgram || showPlaceholder) {
                 Text(
-                    title.ifBlank { "No guide data" },
+                    title.ifBlank { placeholderText },
                     color = if (hasProgram) TextPrimary else TextMuted,
                     fontSize = if (hasProgram) 12.sp else 10.sp,
                     fontWeight = FontWeight.Bold,
@@ -897,6 +1164,25 @@ private fun GuideProgramCell(
                 )
             }
         }
+        if (onInfoClick != null) {
+            Box(
+                modifier = Modifier
+                    .padding(start = 5.dp, bottom = 4.dp)
+                    .size(22.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onInfoClick)
+                    .background(Panel.copy(alpha = 0.9f))
+                    .border(1.dp, Border.copy(alpha = 0.7f), CircleShape)
+                    .align(Alignment.BottomStart),
+                contentAlignment = Alignment.Center
+            ) {
+                SmallGlyph(
+                    kind = GlyphKind.Info,
+                    tint = TextSecondary,
+                    modifier = Modifier.size(12.dp)
+                )
+            }
+        }
         if (isCurrent) {
             Box(
                 modifier = Modifier
@@ -907,6 +1193,275 @@ private fun GuideProgramCell(
             )
         }
     }
+}
+
+@Composable
+private fun ProgramInfoDialog(
+    channel: Channel,
+    program: GuideProgramBlock,
+    onDismiss: () -> Unit
+) {
+    val start = Instant.ofEpochMilli(program.startsAtEpochMillis)
+        .atZone(ZoneId.systemDefault())
+    val end = Instant.ofEpochMilli(program.endsAtEpochMillis)
+        .atZone(ZoneId.systemDefault())
+    val schedule = buildString {
+        append(start.format(ProgramDateFormatter))
+        append(", ")
+        append(start.format(TimeSlotFormatter).lowercase())
+        append(" - ")
+        append(end.format(TimeSlotFormatter).lowercase())
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Panel,
+        shape = RoundedCornerShape(8.dp),
+        title = {
+            Text(
+                program.title,
+                color = TextPrimary,
+                fontSize = 19.sp,
+                lineHeight = 23.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.sp
+            )
+        },
+        text = {
+            Column {
+                Text(
+                    channel.name,
+                    color = AccentAlt,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.sp
+                )
+                Row(
+                    modifier = Modifier.padding(top = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    SmallGlyph(
+                        kind = GlyphKind.Clock,
+                        tint = TextSecondary,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Text(
+                        schedule,
+                        color = TextSecondary,
+                        fontSize = 13.sp,
+                        letterSpacing = 0.sp,
+                        modifier = Modifier.padding(start = 7.dp)
+                    )
+                }
+                Text(
+                    program.description?.takeIf { it.isNotBlank() }
+                        ?: "No programme description is available.",
+                    color = if (program.description.isNullOrBlank()) TextMuted else TextPrimary,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                    letterSpacing = 0.sp,
+                    modifier = Modifier.padding(top = 18.dp)
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close", color = Accent, letterSpacing = 0.sp)
+            }
+        }
+    )
+}
+
+@Composable
+private fun CountryGroupFilterControls(
+    filters: List<CountryGroupFilter>,
+    selected: Set<CountryGroupFilter>,
+    onSelected: (CountryGroupFilter) -> Unit,
+    onEdit: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        CountryGroupFilterBar(
+            filters = filters,
+            selected = selected,
+            onSelected = onSelected,
+            modifier = Modifier.weight(1f)
+        )
+        Box(
+            modifier = Modifier
+                .padding(start = 8.dp)
+                .width(52.dp)
+                .height(38.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .clickable(onClick = onEdit)
+                .background(Panel.copy(alpha = 0.9f))
+                .border(1.dp, Border, RoundedCornerShape(6.dp))
+                .testTag(TestTags.CountryFilterEdit),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                "Edit",
+                color = TextSecondary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 0.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun CountryGroupFilterBar(
+    filters: List<CountryGroupFilter>,
+    selected: Set<CountryGroupFilter>,
+    onSelected: (CountryGroupFilter) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(38.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(Panel.copy(alpha = 0.9f))
+            .border(1.dp, Border, RoundedCornerShape(6.dp)),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        filters.forEachIndexed { index, filter ->
+            if (index > 0) {
+                Spacer(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .fillMaxHeight()
+                        .background(Border.copy(alpha = 0.7f))
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .clickable { onSelected(filter) }
+                    .background(if (filter in selected) Accent.copy(alpha = 0.8f) else Color.Transparent)
+                    .testTag("${TestTags.CountryFilterPrefix}${filter.name.lowercase()}"),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    filter.label,
+                    color = if (filter in selected) TextPrimary else TextSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = if (filter in selected) FontWeight.Bold else FontWeight.Medium,
+                    letterSpacing = 0.sp,
+                    maxLines = 1
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CountryFilterEditorDialog(
+    availableFilters: List<CountryGroupFilter>,
+    enabledFilters: List<CountryGroupFilter>,
+    onSave: (List<CountryGroupFilter>) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var pendingFilters by remember(availableFilters, enabledFilters) {
+        mutableStateOf(enabledFilters.toSet())
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Panel,
+        shape = RoundedCornerShape(8.dp),
+        title = {
+            Text(
+                "Choose countries",
+                color = TextPrimary,
+                fontSize = 19.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.sp
+            )
+        },
+        text = {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 380.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                items(availableFilters, key = { it.name }) { filter ->
+                    val checked = filter in pendingFilters
+                    val enabled = checked || pendingFilters.size < CountryGroupFilter.MaxEnabledFilters
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable(enabled = enabled) {
+                                pendingFilters = if (checked) {
+                                    pendingFilters - filter
+                                } else {
+                                    pendingFilters + filter
+                                }
+                            }
+                            .testTag("${TestTags.CountryFilterOptionPrefix}${filter.name.lowercase()}")
+                            .padding(horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = checked,
+                            onCheckedChange = { shouldCheck ->
+                                pendingFilters = if (shouldCheck) {
+                                    if (pendingFilters.size < CountryGroupFilter.MaxEnabledFilters) pendingFilters + filter else pendingFilters
+                                } else {
+                                    pendingFilters - filter
+                                }
+                            },
+                            enabled = enabled,
+                            colors = CheckboxDefaults.colors(
+                                checkedColor = Accent,
+                                uncheckedColor = TextSecondary,
+                                checkmarkColor = TextPrimary,
+                                disabledCheckedColor = Accent.copy(alpha = 0.45f),
+                                disabledUncheckedColor = TextMuted.copy(alpha = 0.45f)
+                            )
+                        )
+                        Text(
+                            filter.displayName,
+                            color = if (enabled) TextPrimary else TextMuted,
+                            fontSize = 14.sp,
+                            letterSpacing = 0.sp,
+                            modifier = Modifier
+                                .padding(start = 8.dp)
+                                .weight(1f)
+                        )
+                        Text(
+                            filter.label,
+                            color = if (checked) Accent else TextMuted,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            letterSpacing = 0.sp
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onSave(availableFilters.filter { it in pendingFilters })
+                },
+                enabled = pendingFilters.isNotEmpty()
+            ) {
+                Text("Save", color = if (pendingFilters.isNotEmpty()) Accent else TextMuted, letterSpacing = 0.sp)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = TextSecondary, letterSpacing = 0.sp)
+            }
+        }
+    )
 }
 
 @Composable
@@ -928,7 +1483,12 @@ private fun LiveGroupRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         SmallGlyph(
-            kind = if (group == "Favourites") GlyphKind.Star else GlyphKind.List,
+            kind = when (group) {
+                "Favourites" -> GlyphKind.Star
+                RecentlyWatchedGroup -> GlyphKind.Clock
+                LiveSportsGroup -> GlyphKind.Screen
+                else -> GlyphKind.List
+            },
             tint = if (group == "Favourites") AccentAlt else TextSecondary,
             modifier = Modifier.size(24.dp)
         )
@@ -1226,6 +1786,7 @@ private fun SearchScreen(
 private fun PlaylistsScreen(
     playlists: List<IptvPlaylist>,
     refreshState: PlaylistRefreshState,
+    epgSyncStatus: EpgSyncStatus,
     onAddPlaylist: () -> Unit,
     onRefreshPlaylist: (String) -> Unit,
     onDeletePlaylist: (String) -> Unit,
@@ -1260,9 +1821,16 @@ private fun PlaylistsScreen(
 
         if (playlists.isNotEmpty()) {
             LazyColumn(
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                    start = 18.dp,
+                    end = 18.dp,
+                    bottom = 16.dp
+                ),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                item(key = "epg-sync-status") {
+                    EpgSyncPanel(status = epgSyncStatus)
+                }
                 items(playlists, key = { it.id }) { playlist ->
                     PlaylistCard(
                         playlist = playlist,
@@ -1275,6 +1843,81 @@ private fun PlaylistsScreen(
         } else {
             EmptyPlaylistState(onAddPlaylist = onAddPlaylist)
         }
+    }
+}
+
+@Composable
+private fun EpgSyncPanel(status: EpgSyncStatus) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(Panel)
+            .border(1.dp, Border.copy(alpha = 0.7f), RoundedCornerShape(8.dp))
+            .padding(14.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SmallGlyph(
+                kind = GlyphKind.Calendar,
+                tint = if (status.isError) Color(0xFFFF8A8A) else AccentAlt,
+                modifier = Modifier.size(18.dp)
+            )
+            Text(
+                "Daily EPG Sync",
+                color = TextPrimary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.sp,
+                modifier = Modifier.padding(start = 9.dp)
+            )
+            Spacer(modifier = Modifier.weight(1f))
+            status.progressPercent?.let { percent ->
+                Text(
+                    "$percent%",
+                    color = if (status.isRunning) AccentAlt else TextSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.sp
+                )
+            }
+        }
+        Text(
+            status.message,
+            color = if (status.isError) Color(0xFFFFA3A3) else TextSecondary,
+            fontSize = 12.sp,
+            lineHeight = 16.sp,
+            letterSpacing = 0.sp,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        if (status.isRunning) {
+            if (status.progressPercent != null) {
+                LinearProgressIndicator(
+                    progress = { status.progressPercent / 100f },
+                    color = AccentAlt,
+                    trackColor = Border.copy(alpha = 0.55f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 11.dp)
+                        .height(4.dp)
+                )
+            } else {
+                LinearProgressIndicator(
+                    color = AccentAlt,
+                    trackColor = Border.copy(alpha = 0.55f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 11.dp)
+                        .height(4.dp)
+                )
+            }
+        }
+        Text(
+            "Runs daily on Wi-Fi when battery is not low.",
+            color = TextMuted,
+            fontSize = 10.sp,
+            letterSpacing = 0.sp,
+            modifier = Modifier.padding(top = 9.dp)
+        )
     }
 }
 
@@ -1433,6 +2076,7 @@ private fun PlayerScreen(
     var playbackState by remember { mutableStateOf(Player.STATE_IDLE) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var streamFormat by remember { mutableStateOf(LiveStreamFormat.HLS) }
+    var diagnosticsVisible by remember { mutableStateOf(false) }
     val telemetryRecorder = remember { PlaybackTelemetryRecorder() }
     var telemetry by remember { mutableStateOf(telemetryRecorder.snapshot()) }
     val currentIndex = channels.indexOfFirst { it.id == channel.id }
@@ -1442,6 +2086,8 @@ private fun PlayerScreen(
     val player = remember(streamFormat) {
         IptvPlayerFactory(context).createLivePlayer(streamFormat)
     }
+    var bandwidthEstimate by remember(player) { mutableStateOf<Long?>(null) }
+    var droppedFrames by remember(player) { mutableStateOf(0) }
 
     BackHandler(enabled = !isPipMode, onBack = onBack)
 
@@ -1517,11 +2163,31 @@ private fun PlayerScreen(
                 telemetry = telemetryRecorder.onError(message)
             }
         }
+        val analyticsListener = object : AnalyticsListener {
+            override fun onBandwidthEstimate(
+                eventTime: AnalyticsListener.EventTime,
+                totalLoadTimeMs: Int,
+                totalBytesLoaded: Long,
+                bitrateEstimate: Long
+            ) {
+                bandwidthEstimate = bitrateEstimate.takeIf { it > 0L }
+            }
+
+            override fun onDroppedVideoFrames(
+                eventTime: AnalyticsListener.EventTime,
+                droppedFrameCount: Int,
+                elapsedMs: Long
+            ) {
+                droppedFrames += droppedFrameCount
+            }
+        }
 
         player.addListener(listener)
+        player.addAnalyticsListener(analyticsListener)
 
         onDispose {
             player.removeListener(listener)
+            player.removeAnalyticsListener(analyticsListener)
             player.release()
         }
     }
@@ -1546,14 +2212,43 @@ private fun PlayerScreen(
     }
 
     LaunchedEffect(player, channel.id, streamFormat) {
+        var healthLogTicks = 0
         while (true) {
-            delay(5_000)
-            Log.d(
-                "StreamHubPlayer",
-                "health channel=${channel.id} source=${streamFormat.name} " +
-                    "state=${player.playbackState} bufferedMs=${player.totalBufferedDuration} " +
-                    "liveOffsetMs=${player.currentLiveOffset}"
+            delay(1_000)
+            val videoFormat = player.videoFormat
+            val audioFormat = player.audioFormat
+            val liveOffset = resolveLiveOffset(
+                nativeLiveOffsetMs = player.currentLiveOffset,
+                isLive = player.isCurrentMediaItemLive,
+                durationMs = player.duration,
+                currentPositionMs = player.currentPosition
             )
+            telemetry = telemetryRecorder.onMetrics(
+                PlaybackMetrics(
+                    source = if (streamFormat == LiveStreamFormat.MPEG_TS) "MPEG-TS" else streamFormat.label,
+                    playbackState = playbackStateLabel(player.playbackState, player.isPlaying),
+                    resolution = videoFormat?.let { resolutionLabel(it.width, it.height) },
+                    videoCodec = videoFormat?.let { codecLabel(it.sampleMimeType, it.codecs) },
+                    audioCodec = audioFormat?.let { codecLabel(it.sampleMimeType, it.codecs) },
+                    audioChannelCount = audioFormat?.channelCount?.takeIf { it > 0 },
+                    audioSampleRateHz = audioFormat?.sampleRate?.takeIf { it > 0 },
+                    bandwidthEstimateBitsPerSecond = bandwidthEstimate,
+                    bufferedDurationMs = player.totalBufferedDuration.coerceAtLeast(0L),
+                    liveOffsetMs = liveOffset.durationMs,
+                    liveOffsetEstimated = liveOffset.estimated,
+                    droppedFrames = droppedFrames
+                )
+            )
+            healthLogTicks++
+            if (healthLogTicks % 5 == 0) {
+                Log.d(
+                    "StreamHubPlayer",
+                    "health channel=${channel.id} source=${streamFormat.name} " +
+                        "state=${player.playbackState} bufferedMs=${player.totalBufferedDuration} " +
+                        "liveOffsetMs=${player.currentLiveOffset} bitrate=$bandwidthEstimate " +
+                        "droppedFrames=$droppedFrames"
+                )
+            }
         }
     }
 
@@ -1611,29 +2306,12 @@ private fun PlayerScreen(
                         modifier = Modifier.padding(top = 2.dp)
                     )
                 }
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(PanelSoft.copy(alpha = 0.88f))
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        "LIVE",
-                        color = AccentAlt,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.sp
-                    )
-                }
+                PlaybackDiagnosticsToggle(
+                    selected = diagnosticsVisible,
+                    onClick = { diagnosticsVisible = !diagnosticsVisible },
+                    modifier = Modifier.padding(start = 8.dp)
+                )
             }
-
-            PlaybackTelemetryPanel(
-                telemetry = telemetry,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .windowInsetsPadding(WindowInsets.statusBars)
-                    .padding(top = 76.dp, start = 14.dp, end = 14.dp)
-            )
 
             Row(
                 modifier = Modifier
@@ -1670,6 +2348,32 @@ private fun PlayerScreen(
                     Text("Next", fontSize = 12.sp, letterSpacing = 0.sp)
                 }
             }
+        }
+
+        if (isLandscape && !isPipMode) {
+            PlaybackDiagnosticsToggle(
+                selected = diagnosticsVisible,
+                onClick = { diagnosticsVisible = !diagnosticsVisible },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(12.dp)
+            )
+        }
+
+        if (diagnosticsVisible && !isPipMode) {
+            PlaybackTelemetryPanel(
+                telemetry = telemetry,
+                modifier = if (isLandscape) {
+                    Modifier
+                        .align(Alignment.TopStart)
+                        .padding(12.dp)
+                } else {
+                    Modifier
+                        .align(Alignment.TopCenter)
+                        .windowInsetsPadding(WindowInsets.statusBars)
+                        .padding(top = 76.dp, start = 14.dp, end = 14.dp)
+                }
+            )
         }
 
         if (playbackState == Player.STATE_BUFFERING || playbackState == Player.STATE_IDLE) {
@@ -1761,42 +2465,144 @@ private fun StreamFormatSelector(
 }
 
 @Composable
-private fun PlaybackTelemetryPanel(
-    telemetry: PlaybackTelemetrySnapshot,
+private fun PlaybackDiagnosticsToggle(
+    selected: Boolean,
+    onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Row(
+    IconButton(
+        onClick = onClick,
         modifier = modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(Color.Black.copy(alpha = 0.48f))
-            .border(1.dp, Border.copy(alpha = 0.72f), RoundedCornerShape(8.dp))
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .width(44.dp)
+            .height(34.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(Color.Black.copy(alpha = 0.62f))
+            .border(
+                1.dp,
+                if (selected) Accent else Border.copy(alpha = 0.8f),
+                RoundedCornerShape(6.dp)
+            )
+            .testTag(TestTags.PlayerDiagnosticsToggle)
     ) {
-        TelemetryValue("Start", telemetry.startupMs?.let { "${it}ms" } ?: "...")
-        TelemetryValue("Rebuf", telemetry.rebufferCount.toString())
-        TelemetryValue("Switch", telemetry.channelSwitchCount.toString())
-        TelemetryValue("Err", telemetry.errorCount.toString())
+        SmallGlyph(
+            kind = GlyphKind.Diagnostics,
+            tint = if (selected) Accent else TextPrimary,
+            modifier = Modifier.size(18.dp)
+        )
     }
 }
 
 @Composable
-private fun TelemetryValue(label: String, value: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+private fun PlaybackTelemetryPanel(
+    telemetry: PlaybackTelemetrySnapshot,
+    modifier: Modifier = Modifier
+) {
+    val videoDescription = listOfNotNull(telemetry.resolution, telemetry.videoCodec)
+        .joinToString(" / ")
+        .ifBlank { "Unknown" }
+    val audioDescription = buildList {
+        telemetry.audioCodec?.let(::add)
+        telemetry.audioChannelCount?.let { channels ->
+            add(
+                when (channels) {
+                    1 -> "Mono"
+                    2 -> "Stereo"
+                    else -> "$channels ch"
+                }
+            )
+        }
+        telemetry.audioSampleRateHz?.let { add("${it / 1_000} kHz") }
+    }.joinToString(" / ").ifBlank { "Unknown" }
+    val stateColor = when (telemetry.playbackState) {
+        "Playing" -> Success
+        "Buffering" -> Color(0xFFFFC857)
+        else -> TextSecondary
+    }
+
+    Column(
+        modifier = modifier
+            .widthIn(max = 350.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color.Black.copy(alpha = 0.86f))
+            .border(1.dp, Border.copy(alpha = 0.72f), RoundedCornerShape(8.dp))
+            .padding(12.dp)
+            .testTag(TestTags.PlayerDiagnosticsPanel)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Playback diagnostics",
+                color = TextPrimary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.sp,
+                modifier = Modifier.weight(1f)
+            )
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(stateColor)
+            )
+            Text(
+                telemetry.playbackState,
+                color = stateColor,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 0.sp,
+                modifier = Modifier.padding(start = 6.dp)
+            )
+        }
+        DiagnosticsValueRow("Source", telemetry.source ?: "Unknown", "Bandwidth", formatBitrate(telemetry.bandwidthEstimateBitsPerSecond))
+        DiagnosticsValueRow("Video", videoDescription, "Dropped", telemetry.droppedFrames.toString())
+        DiagnosticsValueRow("Audio", audioDescription, "Buffer", formatPlaybackDuration(telemetry.bufferedDurationMs))
+        val liveOffsetLabel = if (telemetry.liveOffsetEstimated) "Live edge" else "Live delay"
+        val liveOffsetValue = telemetry.liveOffsetMs?.let { offset ->
+            val prefix = if (telemetry.liveOffsetEstimated) "~" else ""
+            prefix + formatPlaybackDuration(offset)
+        } ?: "Not exposed"
+        DiagnosticsValueRow(liveOffsetLabel, liveOffsetValue, "Startup", telemetry.startupMs?.let(::formatPlaybackDuration) ?: "Waiting")
+        DiagnosticsValueRow("Rebuffers", telemetry.rebufferCount.toString(), "Errors", telemetry.errorCount.toString())
+    }
+}
+
+@Composable
+private fun DiagnosticsValueRow(
+    firstLabel: String,
+    firstValue: String,
+    secondLabel: String,
+    secondValue: String
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 9.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        DiagnosticsValue(firstLabel, firstValue, Modifier.weight(1f))
+        DiagnosticsValue(secondLabel, secondValue, Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun DiagnosticsValue(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(modifier = modifier) {
         Text(
             label,
             color = TextMuted,
-            fontSize = 10.sp,
+            fontSize = 9.sp,
             letterSpacing = 0.sp
         )
         Text(
             value,
             color = TextPrimary,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Bold,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
             letterSpacing = 0.sp,
-            modifier = Modifier.padding(top = 2.dp)
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            lineHeight = 13.sp,
+            modifier = Modifier.padding(top = 1.dp)
         )
     }
 }
@@ -1861,6 +2667,9 @@ private fun SettingsScreen(diagnostics: List<PlaybackTelemetrySnapshot>) {
 
 @Composable
 private fun DiagnosticsRow(snapshot: PlaybackTelemetrySnapshot) {
+    val streamDetails = listOfNotNull(snapshot.source, snapshot.resolution, snapshot.videoCodec)
+        .joinToString(" / ")
+        .ifBlank { "Stream details unavailable" }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1876,14 +2685,34 @@ private fun DiagnosticsRow(snapshot: PlaybackTelemetrySnapshot) {
             fontSize = 14.sp,
             letterSpacing = 0.sp
         )
+        Text(
+            "${snapshot.playbackState} / $streamDetails",
+            color = TextSecondary,
+            fontSize = 12.sp,
+            lineHeight = 16.sp,
+            letterSpacing = 0.sp,
+            modifier = Modifier.padding(top = 5.dp)
+        )
         Row(
             modifier = Modifier.padding(top = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Text("Start ${snapshot.startupMs?.let { "${it}ms" } ?: "..."}", color = TextSecondary, fontSize = 12.sp, letterSpacing = 0.sp)
             Text("Rebuf ${snapshot.rebufferCount}", color = TextSecondary, fontSize = 12.sp, letterSpacing = 0.sp)
-            Text("Switch ${snapshot.channelSwitchCount}", color = TextSecondary, fontSize = 12.sp, letterSpacing = 0.sp)
             Text("Err ${snapshot.errorCount}", color = TextSecondary, fontSize = 12.sp, letterSpacing = 0.sp)
+            Text("Drop ${snapshot.droppedFrames}", color = TextSecondary, fontSize = 12.sp, letterSpacing = 0.sp)
+        }
+        Row(
+            modifier = Modifier.padding(top = 5.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text("Buffer ${formatPlaybackDuration(snapshot.bufferedDurationMs)}", color = TextMuted, fontSize = 11.sp, letterSpacing = 0.sp)
+            val liveOffset = snapshot.liveOffsetMs?.let { offset ->
+                val prefix = if (snapshot.liveOffsetEstimated) "~" else ""
+                prefix + formatPlaybackDuration(offset)
+            } ?: "Not exposed"
+            Text("${if (snapshot.liveOffsetEstimated) "Edge" else "Delay"} $liveOffset", color = TextMuted, fontSize = 11.sp, letterSpacing = 0.sp)
+            Text(formatBitrate(snapshot.bandwidthEstimateBitsPerSecond), color = TextMuted, fontSize = 11.sp, letterSpacing = 0.sp)
         }
         snapshot.lastError?.let {
             Text(
@@ -2632,9 +3461,11 @@ private enum class GlyphKind {
     Chevron,
     Clock,
     Close,
+    Diagnostics,
     Eye,
     Filter,
     Hide,
+    Info,
     List,
     Menu,
     Mic,
@@ -2697,6 +3528,15 @@ private fun SmallGlyph(kind: GlyphKind, tint: Color, modifier: Modifier = Modifi
                 drawLine(tint, Offset(w * 0.28f, h * 0.28f), Offset(w * 0.72f, h * 0.72f), strokeWidth = stroke.width, cap = StrokeCap.Round)
                 drawLine(tint, Offset(w * 0.72f, h * 0.28f), Offset(w * 0.28f, h * 0.72f), strokeWidth = stroke.width, cap = StrokeCap.Round)
             }
+            GlyphKind.Diagnostics -> {
+                drawLine(tint, Offset(w * 0.18f, h * 0.82f), Offset(w * 0.82f, h * 0.82f), strokeWidth = stroke.width, cap = StrokeCap.Round)
+                drawLine(tint, Offset(w * 0.28f, h * 0.68f), Offset(w * 0.28f, h * 0.54f), strokeWidth = w * 0.12f, cap = StrokeCap.Round)
+                drawLine(tint, Offset(w * 0.5f, h * 0.68f), Offset(w * 0.5f, h * 0.38f), strokeWidth = w * 0.12f, cap = StrokeCap.Round)
+                drawLine(tint, Offset(w * 0.72f, h * 0.68f), Offset(w * 0.72f, h * 0.22f), strokeWidth = w * 0.12f, cap = StrokeCap.Round)
+                drawLine(tint, Offset(w * 0.2f, h * 0.45f), Offset(w * 0.42f, h * 0.3f), strokeWidth = stroke.width * 0.7f, cap = StrokeCap.Round)
+                drawLine(tint, Offset(w * 0.42f, h * 0.3f), Offset(w * 0.58f, h * 0.4f), strokeWidth = stroke.width * 0.7f, cap = StrokeCap.Round)
+                drawLine(tint, Offset(w * 0.58f, h * 0.4f), Offset(w * 0.8f, h * 0.16f), strokeWidth = stroke.width * 0.7f, cap = StrokeCap.Round)
+            }
             GlyphKind.Eye, GlyphKind.Hide -> {
                 drawOval(tint, topLeft = Offset(w * 0.16f, h * 0.32f), size = Size(w * 0.68f, h * 0.36f), style = stroke)
                 drawCircle(tint, radius = w * 0.1f, center = Offset(w * 0.5f, h * 0.5f), style = stroke)
@@ -2715,6 +3555,22 @@ private fun SmallGlyph(kind: GlyphKind, tint: Color, modifier: Modifier = Modifi
                     close()
                 }
                 drawPath(path, tint, style = stroke)
+            }
+            GlyphKind.Info -> {
+                drawCircle(
+                    tint,
+                    radius = w * 0.38f,
+                    center = Offset(w * 0.5f, h * 0.5f),
+                    style = stroke
+                )
+                drawCircle(tint, radius = w * 0.045f, center = Offset(w * 0.5f, h * 0.32f))
+                drawLine(
+                    tint,
+                    Offset(w * 0.5f, h * 0.47f),
+                    Offset(w * 0.5f, h * 0.7f),
+                    strokeWidth = stroke.width,
+                    cap = StrokeCap.Round
+                )
             }
             GlyphKind.List, GlyphKind.Playlist -> {
                 repeat(3) { index ->

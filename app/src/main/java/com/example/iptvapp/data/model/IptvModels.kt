@@ -21,9 +21,7 @@ data class GuideProgramBlock(
     val time: String,
     val startsAtEpochMillis: Long,
     val endsAtEpochMillis: Long,
-    val progress: Float = 0f,
-    val isCurrent: Boolean = false,
-    val isLiveEvent: Boolean = false
+    val description: String? = null
 )
 
 data class GuideProgram(

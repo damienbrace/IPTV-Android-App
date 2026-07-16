@@ -8,7 +8,6 @@ import com.example.iptvapp.data.model.GuideProgram
 import com.example.iptvapp.data.model.GuideProgramBlock
 import com.example.iptvapp.data.model.IptvHomeState
 import com.example.iptvapp.data.model.IptvPlaylist
-import com.example.iptvapp.data.model.isLikelyLiveSportsEvent
 import com.example.iptvapp.data.remote.XcodesApiClient
 import com.example.iptvapp.data.remote.XcodesLiveStream
 import com.example.iptvapp.data.room.ChannelEntity
@@ -16,14 +15,17 @@ import com.example.iptvapp.data.room.EpgProgramEntity
 import com.example.iptvapp.data.room.IptvDatabase
 import com.example.iptvapp.data.room.PlaylistEntity
 import com.example.iptvapp.data.security.CredentialVault
+import com.example.iptvapp.sync.EpgSyncPriorityController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -33,6 +35,7 @@ import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.concurrent.atomic.AtomicInteger
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LocalIptvRepository(
@@ -47,12 +50,17 @@ class LocalIptvRepository(
         .flatMapLatest { channelIds ->
             if (channelIds.isEmpty()) flowOf(emptyList<EpgProgramEntity>()) else dao.observePrograms(channelIds)
         }
-
-    override val homeState: Flow<IptvHomeState> = combine(
+    private val currentGuidePrograms = flow {
+        while (true) {
+            val now = System.currentTimeMillis()
+            emit(now)
+            delay(60_000L - (now % 60_000L) + GUIDE_CLOCK_MARGIN_MILLIS)
+        }
+    }.flatMapLatest(dao::observeCurrentPrograms)
+    private val catalog = combine(
         dao.observePlaylists(),
-        dao.observeChannels(),
-        activeGuidePrograms
-    ) { playlistEntities, channelEntities, programEntities ->
+        dao.observeChannels()
+    ) { playlistEntities, channelEntities ->
         val playlistsById = playlistEntities.associateBy { it.id }
         val playlistPasswordsById = playlistEntities.mapNotNull { playlist ->
             runCatching { playlist.id to credentialVault.decrypt(playlist.encryptedPassword) }.getOrNull()
@@ -64,21 +72,35 @@ class LocalIptvRepository(
                 password = playlistPasswordsById[channel.playlistId]
             )
         }.ifEmpty { sampleChannels }
-        val channelsById = channels.associateBy { it.id }
-        IptvHomeState(
+        IptvCatalog(
             channels = channels,
-            guidePrograms = if (programEntities.isEmpty()) {
-                emptyList()
-            } else {
-                programEntities.toGuidePrograms(channelsById)
-            },
+            channelsById = channels.associateBy { it.id },
             playlists = playlistEntities.map { it.toPlaylist() },
-            recentSearches = listOf("Seven", "ESPN", "Discovery", "News", "Sports"),
             categories = buildList {
                 add("All Channels")
                 add("Favourites")
                 addAll(channels.map { it.category }.distinct())
             }
+        )
+    }.flowOn(Dispatchers.Default)
+
+    override val homeState: Flow<IptvHomeState> = combine(
+        catalog,
+        activeGuidePrograms,
+        currentGuidePrograms
+    ) { catalogState, activeProgramEntities, currentProgramEntities ->
+        val programEntities = (activeProgramEntities + currentProgramEntities)
+            .distinctBy { it.id }
+        IptvHomeState(
+            channels = catalogState.channels,
+            guidePrograms = if (programEntities.isEmpty()) {
+                emptyList()
+            } else {
+                programEntities.toGuidePrograms(catalogState.channelsById)
+            },
+            playlists = catalogState.playlists,
+            recentSearches = listOf("Seven", "ESPN", "Discovery", "News", "Sports"),
+            categories = catalogState.categories
         )
     }.flowOn(Dispatchers.Default)
 
@@ -125,19 +147,68 @@ class LocalIptvRepository(
         return xcodesApiClient.testConnection(serverUrl, username, password).map { }
     }
 
-    override suspend fun refreshPlaylist(playlistId: String): Result<Unit> = withContext(Dispatchers.IO) {
+    override suspend fun refreshPlaylist(
+        playlistId: String,
+        onProgress: (progress: Float?, message: String) -> Unit
+    ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             val playlist = dao.getPlaylist(playlistId) ?: error("Playlist not found")
             val password = credentialVault.decrypt(playlist.encryptedPassword)
-            refreshPlaylist(playlist, password)
+            refreshPlaylist(playlist, password, onProgress)
         }
     }
 
-    override suspend fun refreshGuide(channelIds: List<String>): Result<Unit> = withContext(Dispatchers.IO) {
+    override suspend fun refreshGuide(
+        channelIds: List<String>,
+        onProgress: (completed: Int, total: Int) -> Unit
+    ): Result<Unit> {
+        return loadGuide(
+            channelIds = channelIds,
+            activate = true,
+            minimumCoverageMillis = MIN_GUIDE_COVERAGE_MILLIS,
+            concurrency = ON_DEMAND_EPG_CONCURRENCY,
+            onProgress = onProgress
+        )
+    }
+
+    override suspend fun preloadGuide(channelIds: List<String>): Result<Unit> {
+        return loadGuide(
+            channelIds = channelIds,
+            activate = false,
+            minimumCoverageMillis = PRELOAD_GUIDE_COVERAGE_MILLIS,
+            concurrency = PRELOAD_EPG_CONCURRENCY,
+            onProgress = { _, _ -> }
+        )
+    }
+
+    private suspend fun loadGuide(
+        channelIds: List<String>,
+        activate: Boolean,
+        minimumCoverageMillis: Long,
+        concurrency: Int,
+        onProgress: (completed: Int, total: Int) -> Unit
+    ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             val requestedIds = channelIds.distinct().take(MAX_ON_DEMAND_EPG_CHANNELS)
             if (requestedIds.isEmpty()) return@runCatching
-            activeGuideChannelIds.value = requestedIds
+            val progressStep = maxOf(
+                1,
+                (requestedIds.size + MAX_GUIDE_PROGRESS_UPDATES - 1) / MAX_GUIDE_PROGRESS_UPDATES
+            )
+            fun reportProgress(completed: Int, force: Boolean = false) {
+                val boundedCompleted = completed.coerceIn(0, requestedIds.size)
+                if (
+                    force ||
+                    boundedCompleted == requestedIds.size ||
+                    boundedCompleted % progressStep == 0
+                ) {
+                    onProgress(boundedCompleted, requestedIds.size)
+                }
+            }
+            reportProgress(completed = 0, force = true)
+            if (activate) {
+                activeGuideChannelIds.value = requestedIds
+            }
 
             val channels = requestedIds
                 .chunked(SQL_QUERY_BATCH_SIZE)
@@ -152,8 +223,10 @@ class LocalIptvRepository(
                 val channelPrograms = existingPrograms[channel.id]
                     .orEmpty()
                 val latestGuideEnd = channelPrograms.maxOfOrNull { it.endsAtEpochMillis } ?: 0L
-                latestGuideEnd < now + MIN_GUIDE_COVERAGE_MILLIS
+                latestGuideEnd < now + minimumCoverageMillis
             }
+            val completedChannels = AtomicInteger(requestedIds.size - channelsNeedingGuide.size)
+            reportProgress(completedChannels.get(), force = true)
             if (channelsNeedingGuide.isEmpty()) return@runCatching
 
             val playlists = channelsNeedingGuide
@@ -164,31 +237,39 @@ class LocalIptvRepository(
             val passwords = playlists.mapNotNull { (playlistId, playlist) ->
                 runCatching { playlistId to credentialVault.decrypt(playlist.encryptedPassword) }.getOrNull()
             }.toMap()
-            val semaphore = Semaphore(ON_DEMAND_EPG_CONCURRENCY)
+            val semaphore = Semaphore(concurrency)
+            val failedRequests = AtomicInteger(0)
             val refreshedPrograms = coroutineScope {
-                channelsNeedingGuide.mapNotNull { channel ->
-                    val playlist = playlists[channel.playlistId] ?: return@mapNotNull null
-                    val password = passwords[channel.playlistId] ?: return@mapNotNull null
-                    val streamId = channel.streamId ?: return@mapNotNull null
+                channelsNeedingGuide.map { channel ->
                     async {
-                        semaphore.withPermit {
-                            val result = xcodesApiClient.fetchShortEpg(
-                                serverUrl = playlist.serverUrl,
-                                username = playlist.username,
-                                password = password,
-                                streamId = streamId,
-                                limit = ON_DEMAND_EPG_PROGRAM_LIMIT
-                            )
-                            result.exceptionOrNull()?.let { error ->
-                                Log.w(TAG, "On-demand EPG failed for channel ${channel.id}", error)
-                            }
-                            val programs = result.getOrElse { emptyList() }
-                                .filter { program ->
-                                    program.endsAtEpochMillis > now &&
-                                        program.startsAtEpochMillis <= now + EPG_FUTURE_WINDOW_MILLIS
+                        try {
+                            semaphore.withPermit {
+                                val playlist = playlists[channel.playlistId]
+                                    ?: return@withPermit channel to emptyList()
+                                val password = passwords[channel.playlistId]
+                                    ?: return@withPermit channel to emptyList()
+                                val streamId = channel.streamId
+                                    ?: return@withPermit channel to emptyList()
+                                val result = xcodesApiClient.fetchShortEpg(
+                                    serverUrl = playlist.serverUrl,
+                                    username = playlist.username,
+                                    password = password,
+                                    streamId = streamId,
+                                    limit = ON_DEMAND_EPG_PROGRAM_LIMIT
+                                )
+                                if (result.isFailure) {
+                                    failedRequests.incrementAndGet()
                                 }
-                                .sortedBy { it.startsAtEpochMillis }
-                            channel to programs
+                                val programs = result.getOrElse { emptyList() }
+                                    .filter { program ->
+                                        program.endsAtEpochMillis > now &&
+                                            program.startsAtEpochMillis <= now + EPG_FUTURE_WINDOW_MILLIS
+                                    }
+                                    .sortedBy { it.startsAtEpochMillis }
+                                channel to programs
+                            }
+                        } finally {
+                            reportProgress(completedChannels.incrementAndGet())
                         }
                     }
                 }.awaitAll()
@@ -207,12 +288,16 @@ class LocalIptvRepository(
                         )
                     }
                 }
-                dao.replaceProgramsForChannels(successful.map { it.first.id }, entities)
+                // The short endpoint often returns only a handful of rows. Keep the longer
+                // XMLTV schedule and merge these fresher rows into it instead of replacing it.
+                dao.upsertPrograms(entities)
             }
             Log.i(
                 TAG,
-                "On-demand EPG: requested=${requestedIds.size}, stale=${channelsNeedingGuide.size}, " +
-                    "updated=${successful.size}, rows=${successful.sumOf { it.second.size }}"
+                "${if (activate) "Active" else "Preloaded"} EPG: requested=${requestedIds.size}, " +
+                    "stale=${channelsNeedingGuide.size}, " +
+                    "updated=${successful.size}, failed=${failedRequests.get()}, " +
+                    "rows=${successful.sumOf { it.second.size }}"
             )
         }
     }
@@ -235,19 +320,46 @@ class LocalIptvRepository(
         return channel.toChannel(playlist, password)
     }
 
-    suspend fun refreshSavedPlaylists(): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun refreshSavedPlaylists(
+        onProgress: (progress: Float?, message: String) -> Unit = { _, _ -> }
+    ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             val playlists = dao.getPlaylists()
-            playlists.forEach { playlist ->
+            if (playlists.isEmpty()) {
+                onProgress(1f, "No playlists to sync.")
+            }
+            playlists.forEachIndexed { index, playlist ->
                 val password = credentialVault.decrypt(playlist.encryptedPassword)
-                refreshPlaylist(playlist, password)
+                refreshPlaylist(playlist, password) { progress, message ->
+                    val overallProgress = progress?.let {
+                        (index.toFloat() + it) / playlists.size.toFloat()
+                    }
+                    onProgress(overallProgress, message)
+                }
             }
         }
     }
 
-    private suspend fun refreshPlaylist(playlist: PlaylistEntity, password: String) {
+    suspend fun hasSavedPlaylists(): Boolean = withContext(Dispatchers.IO) {
+        dao.getPlaylists().isNotEmpty()
+    }
+
+    private suspend fun refreshPlaylist(
+        playlist: PlaylistEntity,
+        password: String,
+        onProgress: (progress: Float?, message: String) -> Unit
+    ) {
+        onProgress(0f, "Refreshing ${playlist.name} channels...")
         xcodesApiClient.testConnection(playlist.serverUrl, playlist.username, password).getOrThrow()
-        val channelEntities = fetchChannelEntities(playlist.id, playlist.serverUrl, playlist.username, password)
+        val favoriteChannelIds = dao.getFavoriteChannelIds(playlist.id).toSet()
+        val channelEntities = fetchChannelEntities(
+            playlist.id,
+            playlist.serverUrl,
+            playlist.username,
+            password
+        ).map { channel ->
+            if (channel.id in favoriteChannelIds) channel.copy(favorite = true) else channel
+        }
 
         dao.upsertPlaylist(
             playlist.copy(
@@ -256,6 +368,14 @@ class LocalIptvRepository(
             )
         )
         dao.replaceChannelsForPlaylist(playlist.id, channelEntities)
+        onProgress(0.1f, "Downloading the full ${playlist.name} guide...")
+        syncFullEpg(
+            channelEntities = channelEntities,
+            serverUrl = playlist.serverUrl,
+            username = playlist.username,
+            password = password,
+            onProgress = onProgress
+        )
     }
 
     private suspend fun fetchChannelEntities(
@@ -347,11 +467,12 @@ class LocalIptvRepository(
         )
     }
 
-    private suspend fun syncShortEpg(
+    private suspend fun syncFullEpg(
         channelEntities: List<ChannelEntity>,
         serverUrl: String,
         username: String,
-        password: String
+        password: String,
+        onProgress: (progress: Float?, message: String) -> Unit
     ) {
         val liveChannels = channelEntities.filter {
             it.streamKind == STREAM_KIND_LIVE && it.streamId != null
@@ -365,12 +486,21 @@ class LocalIptvRepository(
             targetChannelIds = xmltvChannels.mapNotNull { it.epgChannelId }.toSet(),
             targetChannelNames = xmltvChannels.map { it.name }.toSet(),
             windowStartEpochMillis = now - EPG_PAST_WINDOW_MILLIS,
-            windowEndEpochMillis = now + EPG_FUTURE_WINDOW_MILLIS
+            windowEndEpochMillis = now + EPG_FUTURE_WINDOW_MILLIS,
+            onProgress = { downloadProgress ->
+                onProgress(
+                    downloadProgress?.let { 0.1f + (it * 0.7f) },
+                    "Downloading and reading full guide..."
+                )
+            },
+            beforeRead = EpgSyncPriorityController::awaitBackgroundTurn
         )
         xmltvResult.exceptionOrNull()?.let { error ->
             Log.w(TAG, "XMLTV EPG fetch failed", error)
         }
-        val xmltvPrograms = xmltvResult.getOrElse { emptyList() }
+        val xmltvPrograms = xmltvResult.getOrThrow()
+        EpgSyncPriorityController.awaitBackgroundTurn()
+        onProgress(0.82f, "Matching guide data to channels...")
 
         val channelsByEpgId = xmltvChannels
             .groupBy { it.epgChannelId.orEmpty() }
@@ -380,71 +510,60 @@ class LocalIptvRepository(
             .filter { (_, guideKey) -> guideKey.isNotBlank() }
         val channelsByGuideKey = channelsWithGuideKeys.groupBy({ (_, guideKey) -> guideKey }, { (channel, _) -> channel })
         val channelsByGuideToken = channelsWithGuideKeys.groupBy { (_, guideKey) -> guideKey.substringBefore(' ') }
-        val xmltvEntities = xmltvPrograms.flatMap { program ->
-            val programGuideKey = (program.channelName ?: program.channelId).normalizedGuideKey()
-            val exactMatches = channelsByEpgId[program.channelId].orEmpty()
-            val nameMatches = if (exactMatches.isEmpty()) {
-                channelsByGuideKey[programGuideKey].orEmpty()
-            } else {
-                emptyList()
-            }
-            val fuzzyMatches = if (exactMatches.isEmpty() && nameMatches.isEmpty()) {
-                programGuideKey
-                    .split(' ')
-                    .asSequence()
-                    .flatMap { token -> channelsByGuideToken[token].orEmpty().asSequence() }
-                    .distinctBy { (channel, _) -> channel.id }
-                    .filter { (_, channelGuideKey) ->
-                        channelGuideKey.length >= MIN_FUZZY_GUIDE_KEY_LENGTH &&
-                            (programGuideKey.contains(channelGuideKey) || channelGuideKey.contains(programGuideKey))
+        val xmltvEntities = buildList {
+            xmltvPrograms.chunked(XMLTV_MATCH_BATCH_SIZE).forEach { batch ->
+                EpgSyncPriorityController.awaitBackgroundTurn()
+                batch.forEach { program ->
+                    val programGuideKey = (program.channelName ?: program.channelId).normalizedGuideKey()
+                    val exactMatches = channelsByEpgId[program.channelId].orEmpty()
+                    val nameMatches = if (exactMatches.isEmpty()) {
+                        channelsByGuideKey[programGuideKey].orEmpty()
+                    } else {
+                        emptyList()
                     }
-                    .map { (channel, _) -> channel }
-                    .toList()
-            } else {
-                emptyList()
-            }
-            (exactMatches + nameMatches + fuzzyMatches).distinctBy { it.id }.mapIndexed { index, channel ->
-                EpgProgramEntity(
-                    id = "${channel.id}-${program.startsAtEpochMillis}-xmltv-$index",
-                    channelId = channel.id,
-                    title = program.title,
-                    description = program.description,
-                    startsAtEpochMillis = program.startsAtEpochMillis,
-                    endsAtEpochMillis = program.endsAtEpochMillis
-                )
+                    val fuzzyMatches = if (exactMatches.isEmpty() && nameMatches.isEmpty()) {
+                        programGuideKey
+                            .split(' ')
+                            .asSequence()
+                            .flatMap { token -> channelsByGuideToken[token].orEmpty().asSequence() }
+                            .distinctBy { (channel, _) -> channel.id }
+                            .filter { (_, channelGuideKey) ->
+                                channelGuideKey.length >= MIN_FUZZY_GUIDE_KEY_LENGTH &&
+                                    (programGuideKey.contains(channelGuideKey) || channelGuideKey.contains(programGuideKey))
+                            }
+                            .map { (channel, _) -> channel }
+                            .toList()
+                    } else {
+                        emptyList()
+                    }
+                    val matches = (exactMatches + nameMatches + fuzzyMatches).distinctBy { it.id }
+                    matches.forEachIndexed { index, channel ->
+                        add(
+                            EpgProgramEntity(
+                                id = "${channel.id}-${program.startsAtEpochMillis}-xmltv-$index",
+                                channelId = channel.id,
+                                title = program.title,
+                                description = program.description,
+                                startsAtEpochMillis = program.startsAtEpochMillis,
+                                endsAtEpochMillis = program.endsAtEpochMillis
+                            )
+                        )
+                    }
+                }
             }
         }
 
         val channelsWithXmltv = xmltvEntities.map { it.channelId }.toSet()
-        val shortEpgChannels = liveChannels
-            .filter { it.id !in channelsWithXmltv }
-            .groupBy { it.category }
-            .values
-            .flatMap { channelsInCategory -> channelsInCategory.take(12) }
-            .distinctBy { it.id }
-            .take(MAX_EPG_SYNC_CHANNELS)
-        val shortEpgEntities = shortEpgChannels.flatMap { channel ->
-            val streamId = channel.streamId ?: return@flatMap emptyList()
-            xcodesApiClient.fetchShortEpg(serverUrl, username, password, streamId).getOrElse { emptyList() }
-                .mapIndexed { index, program ->
-                    EpgProgramEntity(
-                        id = "${channel.id}-${program.startsAtEpochMillis}-short-$index",
-                        channelId = channel.id,
-                        title = program.title,
-                        description = program.description,
-                        startsAtEpochMillis = program.startsAtEpochMillis,
-                        endsAtEpochMillis = program.endsAtEpochMillis
-                    )
-                }
-        }
-        val syncedChannelIds = (channelsWithXmltv + shortEpgEntities.map { it.channelId }).distinct()
+        EpgSyncPriorityController.awaitBackgroundTurn()
+        onProgress(0.92f, "Saving ${xmltvEntities.size} guide programmes...")
         Log.i(
             TAG,
             "EPG sync result: live=${liveChannels.size}, epgIds=${xmltvChannels.count { !it.epgChannelId.isNullOrBlank() }}, " +
                 "xmltvPrograms=${xmltvPrograms.size}, xmltvRows=${xmltvEntities.size}, xmltvChannels=${channelsWithXmltv.size}, " +
-                "shortChannels=${shortEpgChannels.size}, shortRows=${shortEpgEntities.size}"
+                "windowDays=${EPG_FUTURE_WINDOW_MILLIS / (24L * 60L * 60L * 1_000L)}"
         )
-        dao.replaceProgramsForChannels(syncedChannelIds, xmltvEntities + shortEpgEntities)
+        dao.replaceProgramsForChannels(channelsWithXmltv.toList(), xmltvEntities)
+        onProgress(1f, "Full guide sync complete.")
     }
 
     private fun List<EpgProgramEntity>.toGuidePrograms(
@@ -484,20 +603,12 @@ class LocalIptvRepository(
                 progress = currentProgram?.progressAt(now) ?: 0f,
                 startsAtHalfHour = primaryProgram?.startsAtHalfHour() ?: false,
                 timeline = timelinePrograms.map { program ->
-                    val isCurrent = program == currentProgram
                     GuideProgramBlock(
                         title = program.title,
                         time = program.timeRange(),
                         startsAtEpochMillis = program.startsAtEpochMillis,
                         endsAtEpochMillis = program.endsAtEpochMillis,
-                        progress = if (isCurrent) program.progressAt(now) else 0f,
-                        isCurrent = isCurrent,
-                        isLiveEvent = isCurrent && isLikelyLiveSportsEvent(
-                            title = program.title,
-                            description = program.description,
-                            channelName = channel.name,
-                            channelCategory = channel.category
-                        )
+                        description = program.description
                     )
                 }
             )
@@ -618,18 +729,29 @@ class LocalIptvRepository(
     private companion object {
         const val STREAM_KIND_LIVE = "live"
         const val STREAM_KIND_MOVIE = "movie"
-        const val MAX_EPG_SYNC_CHANNELS = 420
         const val MAX_ON_DEMAND_EPG_CHANNELS = 120
         const val ON_DEMAND_EPG_PROGRAM_LIMIT = 384
-        const val ON_DEMAND_EPG_CONCURRENCY = 6
+        const val ON_DEMAND_EPG_CONCURRENCY = 4
+        const val PRELOAD_EPG_CONCURRENCY = 1
+        const val MAX_GUIDE_PROGRESS_UPDATES = 10
+        const val GUIDE_CLOCK_MARGIN_MILLIS = 50L
         const val SQL_QUERY_BATCH_SIZE = 500
         const val EPG_PAST_WINDOW_MILLIS = 24L * 60L * 60L * 1_000L
         const val EPG_FUTURE_WINDOW_MILLIS = 7L * 24L * 60L * 60L * 1_000L
-        const val MIN_GUIDE_COVERAGE_MILLIS = 6L * 24L * 60L * 60L * 1_000L
+        const val MIN_GUIDE_COVERAGE_MILLIS = 6L * 60L * 60L * 1_000L
+        const val PRELOAD_GUIDE_COVERAGE_MILLIS = 60L * 60L * 1_000L
         const val GUIDE_TIMELINE_PROGRAM_LIMIT = 384
         const val DUPLICATE_PROGRAM_OVERLAP_RATIO = 0.8
         const val MIN_FUZZY_GUIDE_KEY_LENGTH = 8
+        const val XMLTV_MATCH_BATCH_SIZE = 500
         const val TAG = "StreamHubEpg"
         val TimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("h:mm a")
     }
 }
+
+private data class IptvCatalog(
+    val channels: List<Channel>,
+    val channelsById: Map<String, Channel>,
+    val playlists: List<IptvPlaylist>,
+    val categories: List<String>
+)

@@ -20,8 +20,18 @@ interface IptvDao {
     @Query("SELECT * FROM epg_programs WHERE channelId IN (:channelIds) ORDER BY startsAtEpochMillis ASC")
     fun observePrograms(channelIds: List<String>): Flow<List<EpgProgramEntity>>
 
+    @Query(
+        "SELECT * FROM epg_programs " +
+            "WHERE startsAtEpochMillis <= :nowEpochMillis AND endsAtEpochMillis > :nowEpochMillis " +
+            "ORDER BY startsAtEpochMillis ASC"
+    )
+    fun observeCurrentPrograms(nowEpochMillis: Long): Flow<List<EpgProgramEntity>>
+
     @Query("SELECT * FROM channels WHERE id IN (:channelIds)")
     suspend fun getChannels(channelIds: List<String>): List<ChannelEntity>
+
+    @Query("SELECT id FROM channels WHERE playlistId = :playlistId AND favorite = 1")
+    suspend fun getFavoriteChannelIds(playlistId: String): List<String>
 
     @Query("SELECT * FROM epg_programs WHERE channelId IN (:channelIds) ORDER BY startsAtEpochMillis ASC")
     suspend fun getPrograms(channelIds: List<String>): List<EpgProgramEntity>

@@ -21,9 +21,17 @@ interface IptvRepository {
         password: String
     ): Result<Unit>
 
-    suspend fun refreshPlaylist(playlistId: String): Result<Unit>
+    suspend fun refreshPlaylist(
+        playlistId: String,
+        onProgress: (progress: Float?, message: String) -> Unit = { _, _ -> }
+    ): Result<Unit>
 
-    suspend fun refreshGuide(channelIds: List<String>): Result<Unit>
+    suspend fun refreshGuide(
+        channelIds: List<String>,
+        onProgress: (completed: Int, total: Int) -> Unit = { _, _ -> }
+    ): Result<Unit>
+
+    suspend fun preloadGuide(channelIds: List<String>): Result<Unit>
 
     suspend fun deletePlaylist(playlistId: String)
 
